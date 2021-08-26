@@ -517,9 +517,7 @@ public abstract class FileBasedSink<UserT, DestinationT, OutputT>
       UNIQUE, // a subdirectory based upon subdirUUID is used.
       CONSISTENT, // a subdirectory common across all pipelines is used.
     }
-
     private TempSubDirType tempSubdirType;
-    private final UUID subdirUUID;
 
     /** Whether windowed writes are being used. */
     @Experimental(Kind.FILESYSTEM)
