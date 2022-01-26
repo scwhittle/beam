@@ -25,7 +25,10 @@ class GrpcVendoring_1_36_0 {
 
   static def guava_version = "30.1-jre"
   static def protobuf_version = "3.15.3"
+  // Once built versioned library this needs to be:
   static def grpc_version = "1.36.0"
+  // To build vendored library this needs to be this:
+  // static def grpc_version = "1.36.0-SNAPSHOT"
   static def gson_version = "2.8.6"
   // tcnative version from https://github.com/grpc/grpc-java/blob/master/SECURITY.md#netty
   static def netty_version = "4.1.52.Final"

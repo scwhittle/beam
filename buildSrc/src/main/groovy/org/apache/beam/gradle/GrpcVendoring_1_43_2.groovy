@@ -33,7 +33,7 @@ package org.apache.beam.gradle
  *    https://github.com/apache/beam/pull/16459)
  */
 class GrpcVendoring_1_43_2 {
-  static def grpc_version = "1.43.2"
+  static def grpc_version = "1.43.2-SNAPSHOT"
 
   // See https://github.com/grpc/grpc-java/blob/v1.43.2/build.gradle
   // or https://search.maven.org/search?q=g:io.grpc%201.43.2
