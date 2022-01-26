@@ -105,6 +105,27 @@ public class CancellableQueue<T extends @NonNull Object> {
     return (T) rval;
   }
 
+  public @Nullable T poll() throws Exception {
+    Object rval;
+    try {
+      lock.lockInterruptibly();
+      if (cancellationException != null) {
+        throw cancellationException;
+      }
+      if (count == 0) {
+        return null;
+      }
+      
+      rval = elements[takeIndex];
+      takeIndex = (takeIndex + 1) % elements.length;
+      count -= 1;
+      notFull.signal();
+    } finally {
+      lock.unlock();
+    }
+    return (T) rval;
+  }
+
   /**
    * Causes any pending and future {@link #put} and {@link #take} invocations to throw an exception.
    *

@@ -22,6 +22,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.Phaser;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.beam.sdk.fn.CancellableQueue;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Cork;
 import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.CallStreamObserver;
 import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
@@ -81,8 +82,18 @@ public final class BufferingStreamObserver<T extends @NonNull Object> implements
         while (outboundObserver.isReady()) {
           T value = queue.take();
           if (value != POISON_PILL) {
-            outboundObserver.onNext(value);
-          } else {
+            try (Cork c = outboundObserver.cork()) {
+              outboundObserver.onNext(value);
+              while (outboundObserver.isReady()) {
+                value = queue.poll();
+                if (value == null || value == POISON_PILL) {
+                  break;
+                }
+                outboundObserver.onNext(value);
+              }
+            }
+          }
+          if (value == POISON_PILL) {
             outboundObserver.onCompleted();
             return;
           }

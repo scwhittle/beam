@@ -19,6 +19,8 @@ package org.apache.beam.runners.dataflow.harness.test;
 
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Cork;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Cork.NoopCork;
 import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.CallStreamObserver;
 import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
 
@@ -144,5 +146,8 @@ public class TestStreams {
 
     @Override
     public void setMessageCompression(boolean enable) {}
+
+    @Override
+    public Cork cork() { return new NoopCork(); }
   }
 }
