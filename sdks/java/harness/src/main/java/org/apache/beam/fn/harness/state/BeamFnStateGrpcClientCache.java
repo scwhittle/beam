@@ -30,7 +30,15 @@ import org.apache.beam.model.pipeline.v1.Endpoints;
 import org.apache.beam.model.pipeline.v1.Endpoints.ApiServiceDescriptor;
 import org.apache.beam.sdk.fn.IdGenerator;
 import org.apache.beam.sdk.fn.stream.OutboundObserverFactory;
+import org.apache.beam.vendor.grpc.v1p36p0.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.CallOptions;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Channel;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.ClientCall;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.ClientInterceptor;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.ForwardingClientCall.SimpleForwardingClientCall;
 import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.ManagedChannel;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Metadata;
+import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.MethodDescriptor;
 import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -87,9 +95,26 @@ public class BeamFnStateGrpcClientCache {
       this.apiServiceDescriptor = apiServiceDescriptor;
       this.outstandingRequests = new ConcurrentHashMap<>();
       this.channel = channelFactory.apply(apiServiceDescriptor);
+      // We use the directExecutor and because we just complete futures when handling
+      // responses.
+      class MorePipeliningClientInterceptor implements ClientInterceptor {
+        @Override
+        public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+            MethodDescriptor<ReqT, RespT> method,
+            CallOptions callOptions, Channel next) {
+          return new SimpleForwardingClientCall<ReqT, RespT>(next.newCall(method, callOptions)) {
+            @Override
+            public void start(Listener<RespT> responseListener, Metadata headers) {
+              super.start(responseListener, headers);
+              super.request(5);
+            }
+          };
+        }
+      }
       this.outboundObserver =
           outboundObserverFactory.outboundObserverFor(
-              BeamFnStateGrpc.newStub(channel)::state, new InboundObserver());
+              BeamFnStateGrpc.newStub(channel).withInterceptors(new MorePipeliningClientInterceptor())
+                      .withExecutor(MoreExecutors.directExecutor())::state, new InboundObserver());
     }
 
     @Override
