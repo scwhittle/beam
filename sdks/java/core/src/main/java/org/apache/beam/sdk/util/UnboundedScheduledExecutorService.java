@@ -30,12 +30,12 @@ import java.util.concurrent.Delayed;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.RunnableScheduledFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -57,8 +57,6 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *
  * <ul>
  *   <li>The core pool size is always 0.
- *   <li>Any work that is immediately executable is given to a thread before returning from the
- *       corresponding {@code execute}, {@code submit}, {@code schedule*} methods.
  *   <li>An unbounded number of threads can be started.
  * </ul>
  */
@@ -190,6 +188,32 @@ public final class UnboundedScheduledExecutorService implements ScheduledExecuto
     this(NanoClock.SYSTEM);
   }
 
+  private static class TransferSyncQueue<T> extends LinkedTransferQueue<T> {
+    // Offer only succeeds if there is a waiting consumer. This triggers creating a new thread if
+    // there was not one ready when used by ThreadPoolExecutor.
+    @Override
+    public boolean offer(T t) {
+      // Could consider tryTransfer with 1 second or something.
+      return tryTransfer(t);
+    }
+
+    // Offer only succeeds if there is a waiting consumer. This triggers creating a new thread if
+    // there was not one ready when used by ThreadPoolExecutor. Also specialize the case where the
+    // timeout is infinite since this method is used for non-core threads.
+    @Override
+    public boolean offer(T t, long l, TimeUnit timeUnit) {
+      if (l == Integer.MAX_VALUE) {
+        return offer(t);
+      }
+
+      try {
+        return tryTransfer(t, l, timeUnit);
+      } catch (InterruptedException e) {
+        return false;
+      }
+    }
+  }
+
   @VisibleForTesting
   UnboundedScheduledExecutorService(NanoClock clock) {
     this.clock = clock;
@@ -199,11 +223,11 @@ public final class UnboundedScheduledExecutorService implements ScheduledExecuto
 
     this.threadPoolExecutor =
         new ThreadPoolExecutor(
-            0,
+            0, // No core threads.
             Integer.MAX_VALUE, // Allow an unlimited number of re-usable threads.
             Long.MAX_VALUE,
             TimeUnit.NANOSECONDS, // Keep non-core threads alive forever.
-            new SynchronousQueue<>(),
+            new TransferSyncQueue<>(),
             threadFactoryBuilder.build());
 
     // Create an internal adapter so that execute does not re-wrap the ScheduledFutureTask again
