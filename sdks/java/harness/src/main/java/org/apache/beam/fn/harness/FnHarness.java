@@ -54,7 +54,14 @@ import org.apache.beam.sdk.options.ExecutorOptions;
 import org.apache.beam.sdk.options.ExperimentalOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.vendor.grpc.v1p48p1.com.google.protobuf.TextFormat;
+import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.CallOptions;
+import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.Channel;
+import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.ClientCall;
+import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.ClientInterceptor;
+import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.ForwardingClientCall.SimpleForwardingClientCall;
 import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.ManagedChannel;
+import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.Metadata;
+import org.apache.beam.vendor.grpc.v1p48p1.io.grpc.MethodDescriptor;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
@@ -186,6 +193,27 @@ public class FnHarness {
         Caches.fromOptions(options));
   }
 
+  // If client is receiving many small messages (This will not work for the blocking iterator stub)
+  public static class MorePipeliningClientInterceptor implements ClientInterceptor {
+    private final int requestNumMessages;
+
+    public MorePipeliningClientInterceptor(int requestNumMessages) {
+      this.requestNumMessages = requestNumMessages;
+    }
+
+    @Override
+    public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+        MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, Channel next) {
+      return new SimpleForwardingClientCall<ReqT, RespT>(next.newCall(method, callOptions)) {
+        @Override
+        public void start(Listener<RespT> responseListener, Metadata headers) {
+          super.start(responseListener, headers);
+          super.request(requestNumMessages);
+        }
+      };
+    }
+  }
+
   /**
    * Run a FnHarness with the given id and options that attaches to the specified logging and
    * control API service descriptors using the given channel factory and outbound observer factory.
@@ -237,6 +265,7 @@ public class FnHarness {
 
       ManagedChannel channel = channelFactory.forDescriptor(controlApiServiceDescriptor);
       BeamFnControlGrpc.BeamFnControlStub controlStub = BeamFnControlGrpc.newStub(channel);
+      controlStub.withInterceptors(new MorePipeliningClientInterceptor(5));
       BeamFnControlGrpc.BeamFnControlBlockingStub blockingControlStub =
           BeamFnControlGrpc.newBlockingStub(channel);
 

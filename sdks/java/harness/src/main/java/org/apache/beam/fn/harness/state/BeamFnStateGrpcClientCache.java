@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import org.apache.beam.fn.harness.FnHarness;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.StateRequest;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.StateResponse;
 import org.apache.beam.model.fnexecution.v1.BeamFnStateGrpc;
@@ -104,7 +105,10 @@ public class BeamFnStateGrpcClientCache {
       this.errorDuringConstruction = false;
       this.outboundObserver =
           outboundObserverFactory.outboundObserverFor(
-              BeamFnStateGrpc.newStub(channel)::state, new InboundObserver());
+              BeamFnStateGrpc.newStub(channel)
+                      .withInterceptors(new FnHarness.MorePipeliningClientInterceptor(5))
+                  ::state,
+              new InboundObserver());
       // Due to safe object publishing, the InboundObserver may invoke closeAndCleanUp before this
       // constructor completes. In that case there is a race where outboundObserver may have not
       // been initialized and hence we invoke onCompleted here.

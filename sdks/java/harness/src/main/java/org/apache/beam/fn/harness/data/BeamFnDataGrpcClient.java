@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import org.apache.beam.fn.harness.FnHarness;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.Elements;
 import org.apache.beam.model.fnexecution.v1.BeamFnDataGrpc;
 import org.apache.beam.model.pipeline.v1.Endpoints;
@@ -102,6 +103,8 @@ public class BeamFnDataGrpcClient implements BeamFnDataClient {
             new BeamFnDataGrpcMultiplexer2(
                 descriptor,
                 outboundObserverFactory,
-                BeamFnDataGrpc.newStub(channelFactory.apply(apiServiceDescriptor))::data));
+                BeamFnDataGrpc.newStub(channelFactory.apply(apiServiceDescriptor))
+                        .withInterceptors(new FnHarness.MorePipeliningClientInterceptor(5))
+                    ::data));
   }
 }
