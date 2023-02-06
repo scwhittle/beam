@@ -168,10 +168,7 @@ public final class UnboundedScheduledExecutorService implements ScheduledExecuto
         } else {
           time = triggerTime(-period);
         }
-        synchronized (tasks) {
-          tasks.add(this);
-          tasks.notify();
-        }
+        scheduleInTheFuture(this);
       }
     }
   }
@@ -498,15 +495,21 @@ public final class UnboundedScheduledExecutorService implements ScheduledExecuto
       threadPoolExecutor.execute(task);
       return;
     }
+    scheduleInTheFuture(task);
+  }
 
+  private <@Nullable @KeyForBottom T> void scheduleInTheFuture(ScheduledFutureTask<T> task) {
     synchronized (tasks) {
       if (isShutdown()) {
         threadPoolExecutor
             .getRejectedExecutionHandler()
             .rejectedExecution(task, threadPoolExecutor);
       }
+      @Nullable ScheduledFutureTask top = tasks.size() == 0 ? null : tasks.peek();
       tasks.add(task);
-      tasks.notify();
+      if (top != tasks.peek()) {
+        tasks.notify();
+      }
     }
   }
 
