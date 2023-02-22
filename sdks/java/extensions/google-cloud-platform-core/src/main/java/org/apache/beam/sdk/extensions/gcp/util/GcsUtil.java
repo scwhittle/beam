@@ -25,11 +25,14 @@ import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Prec
 import com.google.api.client.googleapis.batch.BatchRequest;
 import com.google.api.client.googleapis.batch.json.JsonBatchCallback;
 import com.google.api.client.googleapis.json.GoogleJsonError;
+import com.google.api.client.googleapis.json.GoogleJsonErrorContainer;
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.googleapis.services.json.AbstractGoogleJsonClientRequest;
 import com.google.api.client.http.HttpHeaders;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.HttpStatusCodes;
+import com.google.api.client.json.JsonObjectParser;
+import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.Sleeper;
 import com.google.api.services.storage.Storage;
@@ -235,7 +238,12 @@ public class GcsUtil {
             public <T> void queue(
                 AbstractGoogleJsonClientRequest<T> request, JsonBatchCallback<T> cb)
                 throws IOException {
-              request.queue(batch, cb);
+              com.google.api.client.http.HttpRequest httpRequest = request.buildHttpRequest();
+              batch.queue(
+                  httpRequest,
+                  request.getResponseClass(),
+                  GoogleJsonErrorContainer.class,
+                  cb);
             }
 
             @Override
