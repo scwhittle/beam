@@ -238,7 +238,10 @@ public class FnHarness {
               ThrowingFunction<InstructionRequest, BeamFnApi.InstructionResponse.Builder>>
           handlers = new EnumMap<>(BeamFnApi.InstructionRequest.RequestCase.class);
 
-      ManagedChannel channel = channelFactory.forDescriptor(controlApiServiceDescriptor);
+      // The control client immediately dispatches requests to an executor so we execute on the
+      // direct executor.
+      ManagedChannel channel = channelFactory.withDirectExecutor().forDescriptor(
+          controlApiServiceDescriptor);
       BeamFnControlGrpc.BeamFnControlStub controlStub = BeamFnControlGrpc.newStub(channel);
       BeamFnControlGrpc.BeamFnControlBlockingStub blockingControlStub =
           BeamFnControlGrpc.newBlockingStub(channel);
@@ -343,13 +346,9 @@ public class FnHarness {
       JvmInitializers.runBeforeProcessing(options);
 
       LOG.info("Entering instruction processing loop");
-
-      // The control client immediately dispatches requests to an executor so we execute on the
-      // direct executor. If we created separate channels for different stubs we could use
-      // directExecutor() when building the channel.
       BeamFnControlClient control =
           new BeamFnControlClient(
-              controlStub.withExecutor(MoreExecutors.directExecutor()),
+              controlStub,
               outboundObserverFactory,
               executorService,
               handlers);
