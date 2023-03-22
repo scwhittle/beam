@@ -104,27 +104,22 @@ public class BeamFnControlClient {
 
     @Override
     public void onNext(BeamFnApi.InstructionRequest request) {
-      try {
-        BeamFnLoggingMDC.setInstructionId(request.getInstructionId());
-        LOG.debug("Received InstructionRequest {}", request);
-        executor.execute(
-            () -> {
-              try {
-                // Ensure that we set and clear the MDC since processing the request will occur
-                // in a separate thread.
-                BeamFnLoggingMDC.setInstructionId(request.getInstructionId());
-                BeamFnApi.InstructionResponse response = delegateOnInstructionRequestType(request);
-                sendInstructionResponse(response);
-              } catch (Error e) {
-                sendErrorResponse(e);
-                throw e;
-              } finally {
-                BeamFnLoggingMDC.setInstructionId(null);
-              }
-            });
-      } finally {
-        BeamFnLoggingMDC.setInstructionId(null);
-      }
+      executor.execute(
+          () -> {
+            try {
+              // Ensure that we set and clear the MDC since processing the request will occur
+              // in a separate thread.
+              BeamFnLoggingMDC.setInstructionId(request.getInstructionId());
+              LOG.debug("Received InstructionRequest {}", request);
+              BeamFnApi.InstructionResponse response = delegateOnInstructionRequestType(request);
+              sendInstructionResponse(response);
+            } catch (Error e) {
+              sendErrorResponse(e);
+              throw e;
+            } finally {
+              BeamFnLoggingMDC.setInstructionId(null);
+            }
+          });
     }
 
     @Override
