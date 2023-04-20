@@ -43,6 +43,10 @@ public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
   /** Offset of this window. Windows start at time N * size + offset, where 0 is the epoch. */
   private final Duration offset;
 
+  private final long offsetMillis;
+  private final long sizeMillis;
+  private final long endOfGlobalWindowThresholdMillis;
+
   /**
    * Partitions the timestamp space into half-open intervals of the form [N * size, (N + 1) * size),
    * where 0 is the epoch.
@@ -67,20 +71,12 @@ public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
           "FixedWindows WindowingStrategies must have 0 <= offset < size");
     }
     this.size = size;
+    this.sizeMillis = size.getMillis();
     this.offset = offset;
-  }
-
-  @Override
-  public IntervalWindow assignWindow(Instant timestamp) {
-    Instant start =
-        new Instant(
-            timestamp.getMillis()
-                - timestamp.plus(size).minus(offset).getMillis() % size.getMillis());
+    this.offsetMillis = offset.getMillis();
 
     // The global window is inclusive of max timestamp, while interval window excludes its
-    // upper bound
-    Instant endOfGlobalWindow = GlobalWindow.INSTANCE.maxTimestamp().plus(Duration.millis(1));
-
+    // upper bound.
     // The end of the window is either start + size if that is within the allowable range, otherwise
     // the end of the global window. Truncating the window drives many other
     // areas of this system in the appropriate way automatically.
@@ -88,10 +84,29 @@ public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
     // Though it is curious that the very last representable fixed window is shorter than the rest,
     // when we are processing data in the year 294247, we'll probably have technology that can
     // account for this.
-    Instant end =
-        start.isAfter(endOfGlobalWindow.minus(size)) ? endOfGlobalWindow : start.plus(size);
+    this.endOfGlobalWindowThresholdMillis =
+        GlobalWindow.INSTANCE.maxTimestamp().getMillis() + 1 - sizeMillis;
+  }
 
-    return new IntervalWindow(start, end);
+  @Override
+  public IntervalWindow assignWindow(Instant timestamp) {
+    long timestampMillis = timestamp.getMillis();
+    long startMillis;
+    if (timestampMillis <= minWindowEndMillis) {
+      return new IntervalWindow(new Instant(Long.MIN), new Instant(minWindowEndMillis));
+    }
+
+    long startMillis =
+        timestampMillis - ((timestampMillis + sizeMillis - offsetMillis) % size.getMillis());
+    if (startMillis >= maxWindowStartMillis) {
+      return new IntervalWindow(
+          new Instant(maxWindowStartMillis), new Instant(endOfGlobalWindowThresholdMillis));
+    }
+    Instant end =
+        start.getMillis() >= endOfGlobalWindowThresholdMillis
+            ? new Instant(endOfGlobalWindowThresholdMillis)
+            : new Instant(startMillis + sizeMillis);
+    return new IntervalWindow(new Instant(startMillis), end);
   }
 
   @Override
