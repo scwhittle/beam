@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.List;
+import org.apache.beam.sdk.util.ExposedByteArrayOutputStream;
 import org.apache.beam.sdk.util.VarInt;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
@@ -52,7 +53,7 @@ public class LengthPrefixCoder<T> extends StructuredCoder<T> {
 
   @Override
   public void encode(T value, OutputStream outStream) throws CoderException, IOException {
-    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    ExposedByteArrayOutputStream bos = new ExposedByteArrayOutputStream();
     valueCoder.encode(value, bos, Context.OUTER);
     VarInt.encode(bos.size(), outStream);
     bos.writeTo(outStream);

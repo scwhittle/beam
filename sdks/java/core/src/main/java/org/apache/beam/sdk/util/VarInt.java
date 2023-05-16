@@ -31,6 +31,7 @@ import java.io.OutputStream;
  */
 public class VarInt {
 
+  private static int MAX_VARINT_LONG_BUFFER_SIZE = 10;
   private static long convertIntToLongNoSignExtend(int v) {
     return v & 0xFFFFFFFFL;
   }
@@ -42,13 +43,15 @@ public class VarInt {
 
   /** Encodes the given value onto the stream. */
   public static void encode(long v, OutputStream stream) throws IOException {
+    byte[] buf = new byte[MAX_VARINT_LONG_BUFFER_SIZE];
+    int size = 0;
     do {
       // Encode next 7 bits + terminator bit
       long bits = v & 0x7F;
       v >>>= 7;
-      byte b = (byte) (bits | ((v != 0) ? 0x80 : 0));
-      stream.write(b);
+      buf[size++] = (byte) (bits | ((v != 0) ? 0x80 : 0));
     } while (v != 0);
+    stream.write(buf, 0, size);
   }
 
   /** Decodes an integer value from the given stream. */
