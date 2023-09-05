@@ -58,7 +58,7 @@ jobs:
         name: beam_PreCommit_Whitespace
         steps:       
           - name: Git checkout
-            uses: actions/checkout@v3
+            uses: actions/checkout@v4
           - name: Rerun on comment
             if: github.event.comment.body == 'Run Whitespace PreCommit'
             uses: ./.github/actions/rerun-job-action

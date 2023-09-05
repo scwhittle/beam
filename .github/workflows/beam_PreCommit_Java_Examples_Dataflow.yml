@@ -74,7 +74,7 @@ jobs:
       github.event.comment.body == 'Run Java_Examples_Dataflow PreCommit'
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Rerun on comment
