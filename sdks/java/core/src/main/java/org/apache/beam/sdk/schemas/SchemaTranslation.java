@@ -227,7 +227,10 @@ public class SchemaTranslation {
             SchemaApi.LogicalType.newBuilder()
                 .setUrn(URN_BEAM_LOGICAL_MILLIS_INSTANT)
                 .setRepresentation(fieldTypeToProto(FieldType.INT64, serializeLogicalType))
+                .setArgumentType(fieldTypeToProto(FieldType.INT64, serializeLogicalType))
+                .setArgument(fieldValueToProto(FieldType.INT64, 0L))
                 .build());
+        LOG.warn("Setting empty arg as work-around for date time");
         break;
       case DECIMAL:
         // DECIMAL without precision specified. Used as the representation type of
@@ -236,7 +239,10 @@ public class SchemaTranslation {
             SchemaApi.LogicalType.newBuilder()
                 .setUrn(URN_BEAM_LOGICAL_DECIMAL)
                 .setRepresentation(fieldTypeToProto(FieldType.BYTES, serializeLogicalType))
+                .setArgumentType(fieldTypeToProto(FieldType.INT64, serializeLogicalType))
+                .setArgument(fieldValueToProto(FieldType.INT64, 0L))
                 .build());
+        LOG.warn("Setting empty arg as work-around for decimal");
         break;
       case BYTE:
         builder.setAtomicType(SchemaApi.AtomicType.BYTE);
