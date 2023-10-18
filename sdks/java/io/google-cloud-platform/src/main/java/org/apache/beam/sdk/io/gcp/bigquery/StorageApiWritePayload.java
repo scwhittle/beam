@@ -32,6 +32,7 @@ import org.joda.time.Instant;
 @DefaultSchema(AutoValueSchema.class)
 public abstract class StorageApiWritePayload {
   @SuppressWarnings("mutable")
+  @Encoding
   public abstract byte[] getPayload();
 
   @SuppressWarnings("mutable")
