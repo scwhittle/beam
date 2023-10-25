@@ -899,6 +899,9 @@ public class FnApiDoFnRunnerTest implements Serializable {
 
     @Test
     public void testTimers() throws Exception {
+      MetricsContainerStepMap metricsContainerRegistry = new MetricsContainerStepMap();
+      MetricsContainerImpl metricsContainer = metricsContainerRegistry.getUnboundContainer();
+      Closeable closeable = MetricsEnvironment.scopedMetricsContainer(metricsContainer);
       dateTimeProvider.setDateTimeFixed(10000L);
 
       Pipeline p = Pipeline.create();
@@ -1121,6 +1124,55 @@ public class FnApiDoFnRunnerTest implements Serializable {
                       .build())
               .getData(),
           fakeStateClient.getData());
+
+      List<MonitoringInfo> expected = new ArrayList<MonitoringInfo>();
+      SimpleMonitoringInfoBuilder builder = new SimpleMonitoringInfoBuilder();
+      // builder.setUrn(MonitoringInfoConstants.Urns.ELEMENT_COUNT);
+      // builder.setLabel(
+      //     MonitoringInfoConstants.Labels.PCOLLECTION, "Window.Into()/Window.Assign.out");
+      // builder.setInt64SumValue(2);
+      // expected.add(builder.build());
+      //
+      // builder = new SimpleMonitoringInfoBuilder();
+      // builder.setUrn(MonitoringInfoConstants.Urns.ELEMENT_COUNT);
+      // builder.setLabel(
+      //     MonitoringInfoConstants.Labels.PCOLLECTION,
+      //     "pTransformId/ParMultiDo(TestSideInputIsAccessibleForDownstreamCallers).output");
+      // builder.setInt64SumValue(2);
+      // expected.add(builder.build());
+
+      builder = new SimpleMonitoringInfoBuilder();
+      builder
+          .setUrn(MonitoringInfoConstants.Urns.USER_SUM_INT64)
+          .setLabel(
+              MonitoringInfoConstants.Labels.NAMESPACE,
+              TestTimerfulDoFn.class.getName())
+          .setLabel(
+              MonitoringInfoConstants.Labels.NAME,
+              TestTimerfulDoFn.USER_COUNTER_ELEMS_NAME);
+      builder.setLabel(MonitoringInfoConstants.Labels.PTRANSFORM, TEST_TRANSFORM_ID);
+      builder.setInt64SumValue(1);
+      expected.add(builder.build());
+
+      builder = new SimpleMonitoringInfoBuilder();
+      builder
+          .setUrn(MonitoringInfoConstants.Urns.USER_SUM_INT64)
+          .setLabel(
+              MonitoringInfoConstants.Labels.NAMESPACE,
+              TestTimerfulDoFn.class.getName())
+          .setLabel(
+              MonitoringInfoConstants.Labels.NAME,
+              TestTimerfulDoFn.USER_COUNTER_TIMERS_NAME);
+      builder.setLabel(MonitoringInfoConstants.Labels.PTRANSFORM, TEST_TRANSFORM_ID);
+      builder.setInt64SumValue(4);
+      expected.add(builder.build());
+
+      closeable.close();
+      List<MonitoringInfo> result = new ArrayList<MonitoringInfo>();
+      for (MonitoringInfo mi : metricsContainerRegistry.getMonitoringInfos()) {
+        result.add(mi);
+      }
+      assertThat(result, containsInAnyOrder(expected.toArray()));
     }
 
     private <K> org.apache.beam.runners.core.construction.Timer<K> timerInGlobalWindow(
@@ -1160,6 +1212,13 @@ public class FnApiDoFnRunnerTest implements Serializable {
     }
 
     private static class TestTimerfulDoFn extends DoFn<KV<String, String>, String> {
+      public static final String USER_COUNTER_TIMERS_NAME = "userCountedTimers";
+      public static final String USER_COUNTER_ELEMS_NAME = "userCountedElements";
+
+      private final Counter counterTimers =
+          Metrics.counter(TestTimerfulDoFn.class, USER_COUNTER_TIMERS_NAME);
+      private final Counter counterElems =
+          Metrics.counter(TestTimerfulDoFn.class, USER_COUNTER_ELEMS_NAME);
 
       @StateId("bag")
       private final StateSpec<BagState<String>> bagStateSpec = StateSpecs.bag(StringUtf8Coder.of());
@@ -1185,6 +1244,7 @@ public class FnApiDoFnRunnerTest implements Serializable {
           @TimerId("processing") Timer processingTimeTimer,
           @TimerFamily("event-family") TimerMap eventTimerFamily,
           @TimerFamily("processing-family") TimerMap processingTimerFamily) {
+        counterElems.inc();
         context.output(
             "key:"
                 + context.element().getKey()
@@ -1220,6 +1280,8 @@ public class FnApiDoFnRunnerTest implements Serializable {
           @TimerId("processing") Timer processingTimeTimer,
           @TimerFamily("event-family") TimerMap eventTimerFamily,
           @TimerFamily("processing-family") TimerMap processingTimerFamily) {
+        counterTimers.inc();
+
         context.output("key:" + key + " event" + Iterables.toString(bagState.read()));
         bagState.add("event");
         eventTimeTimer
@@ -1244,6 +1306,8 @@ public class FnApiDoFnRunnerTest implements Serializable {
           @TimerId("processing") Timer processingTimeTimer,
           @TimerFamily("event-family") TimerMap eventTimerFamily,
           @TimerFamily("processing-family") TimerMap processingTimerFamily) {
+        counterTimers.inc();
+
         context.output("key:" + key + " processing" + Iterables.toString(bagState.read()));
         bagState.add("processing");
 
@@ -1270,6 +1334,8 @@ public class FnApiDoFnRunnerTest implements Serializable {
           @TimerId("processing") Timer processingTimeTimer,
           @TimerFamily("event-family") TimerMap eventTimerFamily,
           @TimerFamily("processing-family") TimerMap processingTimerFamily) {
+        counterTimers.inc();
+
         context.output("key:" + key + " event-family" + Iterables.toString(bagState.read()));
         bagState.add("event-family");
 
@@ -1295,6 +1361,8 @@ public class FnApiDoFnRunnerTest implements Serializable {
           @TimerId("processing") Timer processingTimeTimer,
           @TimerFamily("event-family") TimerMap eventTimerFamily,
           @TimerFamily("processing-family") TimerMap processingTimerFamily) {
+        counterTimers.inc();
+
         context.output("key:" + key + " processing-family" + Iterables.toString(bagState.read()));
         bagState.add("processing-family");
 
