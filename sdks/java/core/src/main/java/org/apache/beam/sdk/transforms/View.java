@@ -38,6 +38,7 @@ import org.apache.beam.sdk.values.PCollectionViews;
 import org.apache.beam.sdk.values.PCollectionViews.TypeDescriptorSupplier;
 import org.apache.beam.sdk.values.PCollectionViews.ValueOrMetadata;
 import org.apache.beam.sdk.values.PCollectionViews.ValueOrMetadataCoder;
+import org.apache.beam.sdk.values.TimestampedValue;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -161,6 +162,8 @@ public class View {
   public static <T> AsSingleton<T> asSingleton() {
     return new AsSingleton<>();
   }
+
+  public static <T> AsLatest<T> asLatest() { return new AsLatest<>(); }
 
   /**
    * Returns a {@link View.AsList} transform that takes a {@link PCollection} and returns a {@link
@@ -454,6 +457,50 @@ public class View {
             "Empty PCollection accessed as a singleton view. "
                 + "Consider setting withDefault to provide a default value");
       }
+    }
+  }
+
+
+  /**
+   * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
+   *
+   * <p>Public only so a {@link PipelineRunner} may override its behavior.
+   *
+   * <p>See {@link View#asLatest()}.
+   */
+  @Internal
+  public static class AsLatest<T> extends PTransform<PCollection<T>, PCollectionView<T>> {
+    private final @Nullable T defaultValue;
+    private final boolean hasDefault;
+
+    private AsLatest() {
+      this.defaultValue = null;
+      this.hasDefault = false;
+    }
+
+    private AsLatest(T defaultValue) {
+      this.defaultValue = defaultValue;
+      this.hasDefault = true;
+    }
+
+    @Override
+    public PCollectionView<T> expand(PCollection<T> input) {
+      try {
+        GroupByKey.applicableTo(input);
+      } catch (IllegalStateException e) {
+        throw new IllegalStateException("Unable to create a side-input view from input", e);
+      }
+      Combine.Globally<TimestampedValue<T>, T> latestCombine;
+      if (hasDefault) {
+        latestCombine = Combine.globally(Latest.combineFnWithDefault(defaultValue, input.getCoder()));
+      } else {
+        latestCombine = Combine.globally(Latest.combineFn());
+        latestCombine = latestCombine.withoutDefaults();
+      }
+      return input.apply(
+          "Reify Timestamps", Reify.timestamps())
+          .apply(
+              "Latest Value", latestCombine.asSingletonView());
     }
   }
 

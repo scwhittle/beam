@@ -22,11 +22,14 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.util.Iterator;
+import java.util.Optional;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.NullableCoder;
+import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TimestampedValue;
@@ -62,6 +65,11 @@ public class Latest {
     return new LatestFn<>();
   }
 
+  /** Returns a {@link Combine.CombineFn} that selects the latest element among its inputs. */
+  public static <T> Combine.CombineFn<TimestampedValue<T>, ?, T> combineFnWithDefault(T defaultValue, Coder<T> coder) {
+    return new LatestFn<>(defaultValue, coder);
+  }
+
   /**
    * Returns a {@link PTransform} that takes as input a {@code PCollection<T>} and returns a {@code
    * PCollection<T>} whose contents is the latest element according to its event time, or {@literal
@@ -93,8 +101,41 @@ public class Latest {
    */
   @VisibleForTesting
   static class LatestFn<T> extends Combine.CombineFn<TimestampedValue<T>, TimestampedValue<T>, T> {
+    private static class EncodedDefault<T> {
+      private final byte[] encoded;
+      private final Coder<T> coder;
+
+      EncodedDefault(T value, Coder<T> coder) {
+        this.coder = coder;
+        try {
+          this.encoded = CoderUtils.encodeToByteArray(coder, value);
+        } catch (CoderException e) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "Could not encode the default value %s with the provided coder %s",
+                  value, coder));
+        }
+      }
+
+      T decode() {
+        try {
+          return CoderUtils.decodeFromByteArray(coder, encoded);
+        } catch (CoderException e) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "Could not decode the default value with the provided coder %s", encoded));
+        }
+      }
+    };
+
+    private final Optional<EncodedDefault<T>> encodedDefaultValue;
+
     /** Construct a new {@link LatestFn} instance. */
-    public LatestFn() {}
+    public LatestFn() { this.encodedDefaultValue = Optional.empty(); }
+
+    public LatestFn(T defaultValue, Coder<T> coder) {
+      this.encodedDefaultValue = Optional.of(new EncodedDefault(defaultValue, coder));
+    }
 
     @Override
     public TimestampedValue<T> createAccumulator() {
@@ -157,6 +198,14 @@ public class Latest {
     @Override
     public T extractOutput(TimestampedValue<T> accumulator) {
       return accumulator.getValue();
+    }
+
+    @Override
+    public T defaultValue() {
+      if (!encodedDefaultValue.isPresent()) {
+        return super.defaultValue();
+      }
+      return encodedDefaultValue.get().decode();
     }
   }
 
