@@ -66,7 +66,8 @@ public class Latest {
   }
 
   /** Returns a {@link Combine.CombineFn} that selects the latest element among its inputs. */
-  public static <T> Combine.CombineFn<TimestampedValue<T>, ?, T> combineFnWithDefault(T defaultValue, Coder<T> coder) {
+  public static <T> Combine.CombineFn<TimestampedValue<T>, ?, T> combineFnWithDefault(
+      T defaultValue, Coder<T> coder) {
     return new LatestFn<>(defaultValue, coder);
   }
 
@@ -131,10 +132,12 @@ public class Latest {
     private final Optional<EncodedDefault<T>> encodedDefaultValue;
 
     /** Construct a new {@link LatestFn} instance. */
-    public LatestFn() { this.encodedDefaultValue = Optional.empty(); }
+    public LatestFn() {
+      this.encodedDefaultValue = Optional.empty();
+    }
 
     public LatestFn(T defaultValue, Coder<T> coder) {
-      this.encodedDefaultValue = Optional.of(new EncodedDefault(defaultValue, coder));
+      this.encodedDefaultValue = Optional.of(new EncodedDefault<T>(defaultValue, coder));
     }
 
     @Override

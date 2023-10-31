@@ -332,6 +332,223 @@ public class ViewTest implements Serializable {
 
   @Test
   @Category(ValidatesRunner.class)
+  public void testLatestSideInput() {
+
+    final PCollectionView<Integer> view =
+        pipeline.apply("Create47", Create.of(47)).apply(View.asLatest());
+
+    PCollection<Integer> output =
+        pipeline
+            .apply("Create123", Create.of(1, 2, 3))
+            .apply(
+                "OutputSideInputs",
+                ParDo.of(
+                        new DoFn<Integer, Integer>() {
+                          @ProcessElement
+                          public void processElement(ProcessContext c) {
+                            c.output(c.sideInput(view));
+                          }
+                        })
+                    .withSideInputs(view));
+
+    PAssert.that(output).containsInAnyOrder(47, 47, 47);
+
+    pipeline.run();
+  }
+
+  @Test
+  @Category(ValidatesRunner.class)
+  public void testWindowedLatestSideInput() {
+
+    final PCollectionView<Integer> view =
+        pipeline
+            .apply(
+                "Create47",
+                Create.timestamped(
+                    TimestampedValue.of(47, new Instant(1)),
+                    TimestampedValue.of(48, new Instant(3)),
+                    TimestampedValue.of(49, new Instant(11))))
+            .apply("SideWindowInto", Window.into(FixedWindows.of(Duration.millis(10))))
+            .apply(View.asLatest());
+
+    PCollection<Integer> output =
+        pipeline
+            .apply(
+                "Create123",
+                Create.timestamped(
+                    TimestampedValue.of(1, new Instant(4)),
+                    TimestampedValue.of(2, new Instant(8)),
+                    TimestampedValue.of(3, new Instant(12))))
+            .apply("MainWindowInto", Window.into(FixedWindows.of(Duration.millis(10))))
+            .apply(
+                "OutputSideInputs",
+                ParDo.of(
+                        new DoFn<Integer, Integer>() {
+                          @ProcessElement
+                          public void processElement(ProcessContext c) {
+                            c.output(c.sideInput(view));
+                          }
+                        })
+                    .withSideInputs(view));
+
+    PAssert.that(output).containsInAnyOrder(48, 48, 49);
+
+    pipeline.run();
+  }
+
+  @Test
+  @Category({ValidatesRunner.class, UsesTestStream.class})
+  public void testWindowedLatestSideInputNotPresent() {
+    PCollection<KV<Long, Long>> input =
+        pipeline.apply(
+            TestStream.create(KvCoder.of(VarLongCoder.of(), VarLongCoder.of()))
+                .advanceWatermarkTo(new Instant(0))
+                .addElements(TimestampedValue.of(KV.of(1000L, 1000L), new Instant(1000L)))
+                .advanceWatermarkTo(new Instant(20000))
+                .advanceWatermarkToInfinity());
+
+    final PCollectionView<Long> view =
+        input
+            .apply(Values.create())
+            .apply("SideWindowInto", Window.into(FixedWindows.of(Duration.standardSeconds(100))))
+            .apply("ViewCombine", Combine.globally(Sum.ofLongs()).withoutDefaults())
+            .apply("Rewindow", Window.into(FixedWindows.of(Duration.standardSeconds(10))))
+            .apply(View.<Long>asLatest().withDefaultValue(10L));
+
+    PCollection<Long> output =
+        input
+            .apply("MainWindowInto", Window.into(FixedWindows.of(Duration.standardSeconds(10))))
+            .apply(GroupByKey.create())
+            .apply(
+                "OutputSideInputs",
+                ParDo.of(
+                        new DoFn<KV<Long, Iterable<Long>>, Long>() {
+                          @ProcessElement
+                          public void processElement(ProcessContext c) {
+                            c.output(c.sideInput(view));
+                          }
+                        })
+                    .withSideInputs(view));
+
+    PAssert.that(output)
+        .inWindow(new IntervalWindow(new Instant(0), new Instant(10000)))
+        .containsInAnyOrder(10L);
+
+    pipeline.run();
+  }
+
+  @Test
+  @Category(ValidatesRunner.class)
+  public void testEmptyLatestSideInput() throws Exception {
+
+    final PCollectionView<Integer> view =
+        pipeline
+            .apply("CreateEmptyIntegers", Create.empty(VarIntCoder.of()))
+            .apply(View.asLatest());
+
+    pipeline
+        .apply("Create123", Create.of(1, 2, 3))
+        .apply(
+            "OutputSideInputs",
+            ParDo.of(
+                    new DoFn<Integer, Integer>() {
+                      @ProcessElement
+                      public void processElement(ProcessContext c) {
+                        c.output(c.sideInput(view));
+                      }
+                    })
+                .withSideInputs(view));
+
+    // As long as we get an error, be flexible with how a runner surfaces it
+    thrown.expect(Exception.class);
+
+    pipeline.run();
+  }
+
+  @Test
+  @Category(ValidatesRunner.class)
+  public void testDiscardingLatestSideInput() throws Exception {
+    PCollection<Integer> oneTwoThree =
+        pipeline.apply(
+            Create.timestamped(
+                TimestampedValue.of(1, new Instant(10)),
+                TimestampedValue.of(2, new Instant(20)),
+                TimestampedValue.of(3, new Instant(30))));
+    final PCollectionView<Integer> view =
+        oneTwoThree
+            .apply(Window.<Integer>configure().discardingFiredPanes())
+            .apply(View.<Integer>asLatest());
+
+    PCollection<Integer> output =
+        oneTwoThree.apply(
+            "OutputSideInputs",
+            ParDo.of(
+                    new DoFn<Integer, Integer>() {
+                      @ProcessElement
+                      public void processElement(ProcessContext c) {
+                        c.output(c.sideInput(view));
+                      }
+                    })
+                .withSideInputs(view));
+
+    PAssert.that(output).containsInAnyOrder(30, 30, 30);
+
+    pipeline.run();
+  }
+
+  @Test
+  @Category({ValidatesRunner.class, UsesTriggeredSideInputs.class})
+  public void testTriggeredLatest() {
+    IntervalWindow zeroWindow = new IntervalWindow(new Instant(0), new Instant(1000));
+
+    PCollectionView<Long> view =
+        pipeline
+            .apply(
+                GenerateSequence.from(0)
+                    .withRate(1, Duration.millis(100))
+                    .withTimestampFn(Instant::new)
+                    .withMaxReadTime(Duration.standardSeconds(10)))
+            .apply(
+                "Window side input",
+                Window.<Long>into(FixedWindows.of(Duration.standardSeconds(1)))
+                    .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane()))
+                    .withAllowedLateness(Duration.ZERO)
+                    .discardingFiredPanes())
+            .apply(View.<Long>asLatest());
+
+    final String tag = "latest";
+    PCollection<Long> pc =
+        pipeline
+            .apply(Impulse.create())
+            .apply(WithTimestamps.of(impulse -> new Instant(0)))
+            .apply("Window main input", Window.into(FixedWindows.of(Duration.standardSeconds(1))))
+            .apply(
+                ParDo.of(
+                        new DoFn<byte[], Long>() {
+                          @ProcessElement
+                          public void process(
+                              @SideInput(tag) Long sideInput, OutputReceiver<Long> out)
+                              throws InterruptedException {
+                            // waiting to ensure multiple outputs to side input before reading it
+                            Thread.sleep(1000L);
+                            out.output(sideInput);
+                          }
+                        })
+                    .withSideInput(tag, view));
+
+    PAssert.that(pc)
+        .inWindow(zeroWindow)
+        .satisfies(
+            (Iterable<Long> values) -> {
+              assertThat(values, Matchers.iterableWithSize(1));
+              return null;
+            });
+
+    pipeline.run();
+  }
+
+  @Test
+  @Category(ValidatesRunner.class)
   public void testListSideInput() {
 
     final PCollectionView<List<Integer>> view =
@@ -1662,6 +1879,7 @@ public class ViewTest implements Serializable {
   @Test
   public void testViewGetName() {
     assertEquals("View.AsSingleton", View.<Integer>asSingleton().getName());
+    assertEquals("View.AsLatest", View.<Integer>asLatest().getName());
     assertEquals("View.AsIterable", View.<Integer>asIterable().getName());
     assertEquals("View.AsMap", View.<String, Integer>asMap().getName());
     assertEquals("View.AsMultimap", View.<String, Integer>asMultimap().getName());

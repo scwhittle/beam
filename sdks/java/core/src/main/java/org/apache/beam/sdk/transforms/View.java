@@ -163,7 +163,9 @@ public class View {
     return new AsSingleton<>();
   }
 
-  public static <T> AsLatest<T> asLatest() { return new AsLatest<>(); }
+  public static <T> AsLatest<T> asLatest() {
+    return new AsLatest<>();
+  }
 
   /**
    * Returns a {@link View.AsList} transform that takes a {@link PCollection} and returns a {@link
@@ -460,7 +462,6 @@ public class View {
     }
   }
 
-
   /**
    * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
    *
@@ -483,6 +484,11 @@ public class View {
       this.hasDefault = true;
     }
 
+    /** Default value to return for windows with no value in them. */
+    public AsLatest<T> withDefaultValue(T defaultValue) {
+      return new AsLatest<>(defaultValue);
+    }
+
     @Override
     public PCollectionView<T> expand(PCollection<T> input) {
       try {
@@ -492,15 +498,15 @@ public class View {
       }
       Combine.Globally<TimestampedValue<T>, T> latestCombine;
       if (hasDefault) {
-        latestCombine = Combine.globally(Latest.combineFnWithDefault(defaultValue, input.getCoder()));
+        latestCombine =
+            Combine.globally(Latest.combineFnWithDefault(defaultValue, input.getCoder()));
       } else {
         latestCombine = Combine.globally(Latest.combineFn());
         latestCombine = latestCombine.withoutDefaults();
       }
-      return input.apply(
-          "Reify Timestamps", Reify.timestamps())
-          .apply(
-              "Latest Value", latestCombine.asSingletonView());
+      return input
+          .apply("Reify Timestamps", Reify.timestamps())
+          .apply("Latest Value", latestCombine.asSingletonView());
     }
   }
 
