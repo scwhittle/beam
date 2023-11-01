@@ -197,7 +197,7 @@ public class AutoValueUtils {
     }
 
     Map<String, FieldValueTypeInformation> setterTypes =
-        ReflectUtils.getMethods(builderClass).stream()
+        ReflectUtils.getSortedPublicInstanceMethods(builderClass).stream()
             .filter(ReflectUtils::isSetter)
             .map(FieldValueTypeInformation::forSetter)
             .collect(Collectors.toMap(FieldValueTypeInformation::getName, Function.identity()));
@@ -222,7 +222,7 @@ public class AutoValueUtils {
     }
 
     Method buildMethod =
-        ReflectUtils.getMethods(builderClass).stream()
+        ReflectUtils.getSortedPublicInstanceMethods(builderClass).stream()
             .filter(m -> m.getName().equals("build"))
             .findAny()
             .orElseThrow(() -> new RuntimeException("No build method in builder"));

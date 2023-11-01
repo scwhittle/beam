@@ -62,7 +62,7 @@ public class JavaBeanSchema extends GetterBasedSchemaProviderV2 {
     @Override
     public List<FieldValueTypeInformation> get(TypeDescriptor<?> typeDescriptor) {
       List<Method> methods =
-          ReflectUtils.getMethods(typeDescriptor.getRawType()).stream()
+          ReflectUtils.getSortedPublicInstanceMethods(typeDescriptor.getRawType()).stream()
               .filter(ReflectUtils::isGetter)
               .filter(m -> !m.isAnnotationPresent(SchemaIgnore.class))
               .collect(Collectors.toList());
@@ -110,8 +110,8 @@ public class JavaBeanSchema extends GetterBasedSchemaProviderV2 {
     private static final SetterTypeSupplier INSTANCE = new SetterTypeSupplier();
 
     @Override
-    public List<FieldValueTypeInformation> get(TypeDescriptor<?> typeDescriptor) {
-      return ReflectUtils.getMethods(typeDescriptor.getRawType()).stream()
+    public List<FieldValueTypeInformation> get(Class<?> clazz) {
+      return ReflectUtils.getSortedPublicInstanceMethods(typeDescriptor.getRawType()).stream()
           .filter(ReflectUtils::isSetter)
           .filter(m -> !m.isAnnotationPresent(SchemaIgnore.class))
           .map(FieldValueTypeInformation::forSetter)

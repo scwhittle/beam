@@ -59,7 +59,7 @@ public class JavaFieldSchema extends GetterBasedSchemaProviderV2 {
     @Override
     public List<FieldValueTypeInformation> get(TypeDescriptor<?> typeDescriptor) {
       List<Field> fields =
-          ReflectUtils.getFields(typeDescriptor.getRawType()).stream()
+          ReflectUtils.getSortedPublicInstanceFields(typeDescriptor.getRawType()).stream()
               .filter(m -> !m.isAnnotationPresent(SchemaIgnore.class))
               .collect(Collectors.toList());
       List<FieldValueTypeInformation> types = Lists.newArrayListWithCapacity(fields.size());

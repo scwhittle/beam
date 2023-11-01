@@ -52,12 +52,10 @@ public class AutoValueSchema extends GetterBasedSchemaProviderV2 {
       TypeDescriptor<?> targetTypeDescriptor = AutoValueUtils.getBaseAutoValueClass(typeDescriptor);
 
       List<Method> methods =
-          ReflectUtils.getMethods(targetTypeDescriptor.getRawType()).stream()
+          ReflectUtils.getSortedPublicInstanceMethods(targetTypeDescriptor.getRawType()).stream()
               .filter(ReflectUtils::isGetter)
               // All AutoValue getters are marked abstract.
               .filter(m -> Modifier.isAbstract(m.getModifiers()))
-              .filter(m -> !Modifier.isPrivate(m.getModifiers()))
-              .filter(m -> !Modifier.isProtected(m.getModifiers()))
               .filter(m -> !m.isAnnotationPresent(SchemaIgnore.class))
               .collect(Collectors.toList());
       List<FieldValueTypeInformation> types = Lists.newArrayListWithCapacity(methods.size());

@@ -815,7 +815,7 @@ public class AvroUtils {
     @Override
     public List<FieldValueTypeInformation> get(TypeDescriptor<?> typeDescriptor, Schema schema) {
       Map<String, String> mapping = getMapping(schema);
-      List<Method> methods = ReflectUtils.getMethods(typeDescriptor.getRawType());
+      List<Method> methods = ReflectUtils.getSortedPublicInstanceMethods(typeDescriptor.getRawType());
       List<FieldValueTypeInformation> types = Lists.newArrayList();
       for (int i = 0; i < methods.size(); ++i) {
         Method method = methods.get(i);
@@ -866,7 +866,7 @@ public class AvroUtils {
     @Override
     public List<FieldValueTypeInformation> get(TypeDescriptor<?> typeDescriptor) {
       List<java.lang.reflect.Field> classFields =
-          ReflectUtils.getFields(typeDescriptor.getRawType());
+          ReflectUtils.getSortedPublicInstanceFields(typeDescriptor.getRawType());
       Map<String, FieldValueTypeInformation> types = Maps.newHashMap();
       for (int i = 0; i < classFields.size(); ++i) {
         java.lang.reflect.Field f = classFields.get(i);

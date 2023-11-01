@@ -81,7 +81,7 @@ public class POJOUtilsTest {
     Schema schema =
         POJOUtils.schemaFromPojoClass(
             new TypeDescriptor<SimplePOJO>() {}, JavaFieldTypeSupplier.INSTANCE);
-    assertEquals(SIMPLE_POJO_SCHEMA, schema);
+    SchemaTestUtils.assertSchemaEquivalent(SIMPLE_POJO_SCHEMA, schema);
   }
 
   @Test
