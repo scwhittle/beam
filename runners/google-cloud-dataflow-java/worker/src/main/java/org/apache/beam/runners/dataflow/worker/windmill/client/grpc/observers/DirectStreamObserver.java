@@ -128,6 +128,7 @@ public final class DirectStreamObserver<T> implements StreamObserver<T> {
 
   @Override
   public void onError(Throwable t) {
+    phaser.forceTermination();  // Unblock send to ensure lock is acquired in timely fashion.
     synchronized (lock) {
       outboundObserver.onError(t);
     }
@@ -135,6 +136,7 @@ public final class DirectStreamObserver<T> implements StreamObserver<T> {
 
   @Override
   public void onCompleted() {
+    phaser.forceTermination();  // Unblock send to ensure lock is acquired in timely fashion.
     synchronized (lock) {
       outboundObserver.onCompleted();
     }
