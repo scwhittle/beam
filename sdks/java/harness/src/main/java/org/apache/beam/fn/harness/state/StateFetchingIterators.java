@@ -166,7 +166,18 @@ public class StateFetchingIterators {
 
       @Override
       public BlocksPrefix<T> shrink() {
-        // Copy the list to not hold a reference to the tail of the original list.
+//        XXX was concerned arraylist from sublist was holding onto main list but
+//           arraylist sublist is not specialized in Arraylist constructor. Verified with test
+//        int newSize = getBlocks().size() / 2;
+//        if (newSize < 1) {
+//          return null;
+//        }
+//        // Copy the list manually to not hold a reference to the tail of the original list.
+//        List<Block<T>> subList = new ArrayList<>(newSize);
+//        for (int i = 0; i < newSize; ++i) {
+//          subList.add(getBlocks().get(i));
+//        }
+
         List<Block<T>> subList = new ArrayList<>(getBlocks().subList(0, getBlocks().size() / 2));
         if (subList.isEmpty()) {
           return null;
@@ -470,17 +481,23 @@ public class StateFetchingIterators {
               // Load the next block from cache if it was found.
               if (currentBlockIndex + 1 < blocks.size()) {
                 currentBlock = blocks.get(currentBlockIndex + 1);
-              } else {
-                // Otherwise load the block from state API.
-                currentBlock = loadNextBlock(currentBlock.getNextToken());
+              } else if (currentBlockIndex == blocks.size() - 1) {
+                // Load the block from state API and extend the cache.
 
-                // Append this block to the existing set of blocks if it is logically the next one.
-                if (currentBlockIndex == blocks.size() - 1) {
-                  List<Block<T>> newBlocks = new ArrayList<>(currentBlockIndex + 1);
-                  newBlocks.addAll(blocks);
-                  newBlocks.add(currentBlock);
-                  cache.put(IterableCacheKey.INSTANCE, new BlocksPrefix<>(newBlocks));
-                }
+                // XXX maybe we should have a byte limit for how much we put for
+                // a single iterable?  It could be draining cache of more useful stuff
+                // and the larger it is the more memory we pin here for a single block
+                // if the rest gets evicted or shrinks.
+                currentBlock = loadNextBlock(currentBlock.getNextToken());
+                List<Block<T>> newBlocks = new ArrayList<>(currentBlockIndex + 1);
+                newBlocks.addAll(blocks);
+                newBlocks.add(currentBlock);
+                cache.put(IterableCacheKey.INSTANCE, new BlocksPrefix<>(newBlocks));
+              } else {
+                // Drop the references to allow for collection if needed and load the next block.
+                blocks = null;
+                existing = null;
+                currentBlock = loadNextBlock(currentBlock.getNextToken());
               }
             }
           }

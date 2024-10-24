@@ -23,9 +23,11 @@ import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -34,6 +36,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.beam.fn.harness.Cache;
 import org.apache.beam.fn.harness.Caches;
 import org.apache.beam.fn.harness.state.StateFetchingIterators.CachingStateIterable;
@@ -49,6 +52,7 @@ import org.apache.beam.model.fnexecution.v1.BeamFnApi.StateResponse;
 import org.apache.beam.sdk.coders.BigEndianIntegerCoder;
 import org.apache.beam.sdk.fn.stream.PrefetchableIterator;
 import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Ints;
 import org.junit.Test;
@@ -279,6 +283,56 @@ public class StateFetchingIteratorsTest {
       assertNull(aBlocks.shrink());
     }
 
+    @SuppressWarnings("InlineMeInliner") // inline `Strings.repeat()` - Java 11+ API only
+    @Test
+    public void testBlocksPrefixShrinkageMemoryReduced() throws Exception {
+      List<WeakReference<String>> weakReferences = new ArrayList<>();
+      BlocksPrefix<String> abcBlocks;
+      {
+        List<Block<String>> originalBlocks =
+                Arrays.asList(
+                        Block.fromValues(Arrays.asList(Strings.repeat("A", 1024*1024)), null),
+                        Block.fromValues(Arrays.asList(Strings.repeat("B", 1024*1024)), null),
+                        Block.fromValues(Arrays.asList(Strings.repeat("C", 1024*1024)), null),
+                        Block.fromValues(Arrays.asList(Strings.repeat("D", 1024*1024)), null),
+                        Block.fromValues(Arrays.asList(Strings.repeat("E", 1024*1024)), null),
+                        Block.fromValues(Arrays.asList(Strings.repeat("F", 1024*1024)), null));
+
+        for (Block<String> block : originalBlocks) {
+          weakReferences.add(new WeakReference<>(block.getValues().get(0)));
+        }
+        abcBlocks = new BlocksPrefix<>(originalBlocks).shrink();
+        assertNotNull(abcBlocks);
+        assertThat(
+                abcBlocks.getBlocks(),
+                contains(originalBlocks.get(0), originalBlocks.get(1), originalBlocks.get(2)));
+
+        for (WeakReference<String> weakReference : weakReferences) {
+          assertNotNull(weakReference.get());
+        }
+        System.gc();
+        for (WeakReference<String> weakReference : weakReferences) {
+          assertNotNull(weakReference.get());
+        }
+      }
+
+      boolean worked = false;
+      while (!worked) {
+        System.gc();
+        System.runFinalization();
+        worked = true;
+        for (int i = 0; i < weakReferences.size(); ++i) {
+          if (i < 3) {
+            assertNotNull(weakReferences.get(i).get());
+          } else {
+            if (weakReferences.get(i).get() != null) {
+              worked = false;
+            }
+          }
+        }
+      }
+    }
+
     @Test
     public void testBlocksWeight() throws Exception {
       List<Block<String>> originalBlocks =
@@ -367,7 +421,7 @@ public class StateFetchingIteratorsTest {
     }
   }
 
-  /** Tests for {@link StateFetchingIterators.LazyBlockingStateFetchingIterator}. */
+  /** Tests for {@link LazyBlockingStateFetchingIterator}. */
   @RunWith(JUnit4.class)
   public static class LazyBlockingStateFetchingIteratorTest {
 
