@@ -19,6 +19,7 @@ package org.apache.beam.runners.dataflow.worker.windmill.client.grpc;
 
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Verify.verify;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Verify.verifyNotNull;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -55,6 +56,7 @@ import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.GrpcGetDataS
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.GrpcGetDataStreamRequests.QueuedRequest;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
 import org.apache.beam.sdk.util.BackOff;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -71,7 +73,6 @@ final class GrpcGetDataStream
   /** @implNote {@link QueuedBatch} objects in the queue are is guarded by {@code this} */
   private final Deque<QueuedBatch> batches;
 
-  private final Map<Long, AppendableInputStream> pending;
   private final AtomicLong idGenerator;
   private final JobHeader jobHeader;
   private final int streamingRpcBatchLimit;
@@ -106,7 +107,6 @@ final class GrpcGetDataStream
     this.jobHeader = jobHeader;
     this.streamingRpcBatchLimit = streamingRpcBatchLimit;
     this.batches = new ConcurrentLinkedDeque<>();
-    this.pending = new ConcurrentHashMap<>();
     this.sendKeyedGetDataRequests = sendKeyedGetDataRequests;
     this.processHeartbeatResponses = processHeartbeatResponses;
   }
@@ -153,47 +153,83 @@ final class GrpcGetDataStream
     trySend(getDataRequest);
   }
 
-  @Override
-  protected synchronized void onNewStream() throws WindmillStreamShutdownException {
-    trySend(StreamingGetDataRequest.newBuilder().setHeader(jobHeader).build());
-    if (clientClosed) {
-      // We rely on close only occurring after all methods on the stream have returned.
-      // Since the requestKeyedData and requestGlobalData methods are blocking this
-      // means there should be no pending requests.
-      verify(!hasPendingRequests(), "Pending requests not expected if we've half-closed.");
-    } else {
+  class GetDataHandler implements PhysicalStreamHandler<StreamingGetDataResponse> {
+
+    private final ConcurrentHashMap<Long, AppendableInputStream> pending =
+        new ConcurrentHashMap<>();
+
+    @Override
+    public void onResponse(StreamingGetDataResponse chunk) {
+      checkArgument(chunk.getRequestIdCount() == chunk.getSerializedResponseCount());
+      checkArgument(chunk.getRemainingBytesForResponse() == 0 || chunk.getRequestIdCount() == 1);
+      onHeartbeatResponse(chunk.getComputationHeartbeatResponseList());
+
+      for (int i = 0; i < chunk.getRequestIdCount(); ++i) {
+        long requestId = chunk.getRequestId(i);
+        boolean completeResponse = chunk.getRemainingBytesForResponse() == 0;
+        @Nullable
+        AppendableInputStream responseStream =
+            completeResponse ? pending.remove(requestId) : pending.get(requestId);
+        verifyNotNull(responseStream, "No pending response stream");
+        responseStream.append(chunk.getSerializedResponse(i).newInput());
+        if (completeResponse) {
+          responseStream.complete();
+        }
+      }
+    }
+
+    @Override
+    public boolean hasPendingRequests() {
+      return !pending.isEmpty();
+    }
+
+    @Override
+    public void onDone(Status status) {
+      // if (clientClosed) {
+      //   // We rely on close only occurring after all methods on the stream have returned.
+      //   // Since the requestKeyedData and requestGlobalData methods are blocking this
+      //   // means there should be no pending requests.
+      //   verify(!hasPendingRequests(), "Pending requests not expected if we've half-closed.");
+      // } else {
       for (AppendableInputStream responseStream : pending.values()) {
         responseStream.cancel();
       }
     }
-  }
 
-  @Override
-  protected boolean hasPendingRequests() {
-    return !pending.isEmpty() || !batches.isEmpty();
-  }
-
-  @Override
-  protected void onResponse(StreamingGetDataResponse chunk) {
-    checkArgument(chunk.getRequestIdCount() == chunk.getSerializedResponseCount());
-    checkArgument(chunk.getRemainingBytesForResponse() == 0 || chunk.getRequestIdCount() == 1);
-    onHeartbeatResponse(chunk.getComputationHeartbeatResponseList());
-
-    for (int i = 0; i < chunk.getRequestIdCount(); ++i) {
-      @Nullable AppendableInputStream responseStream = pending.get(chunk.getRequestId(i));
-      if (responseStream == null) {
-        synchronized (this) {
-          // shutdown()/shutdownInternal() cleans up pending, else we expect a pending
-          // responseStream for every response.
-          verify(isShutdown, "No pending response stream");
+    @Override
+    public void appendHtml(PrintWriter writer) {
+      writer.format(
+          "GetDataStream: %d queued batches, %d pending requests [",
+          batches.size(), pending.size());
+      for (Map.Entry<Long, AppendableInputStream> entry : pending.entrySet()) {
+        writer.format("Stream %d ", entry.getKey());
+        if (entry.getValue().isCancelled()) {
+          writer.append("cancelled ");
         }
-        continue;
+        if (entry.getValue().isComplete()) {
+          writer.append("complete ");
+        }
+        int queueSize = entry.getValue().size();
+        if (queueSize > 0) {
+          writer.format("%d queued responses ", queueSize);
+        }
+        long blockedMs = entry.getValue().getBlockedStartMs();
+        if (blockedMs > 0) {
+          writer.format("blocked for %dms", Instant.now().getMillis() - blockedMs);
+        }
       }
-      responseStream.append(chunk.getSerializedResponse(i).newInput());
-      if (chunk.getRemainingBytesForResponse() == 0) {
-        responseStream.complete();
-      }
+      writer.append("]");
     }
+  }
+
+  @Override
+  protected PhysicalStreamHandler<StreamingGetDataResponse> newResponseHandler() {
+    return new GetDataHandler();
+  }
+
+  @Override
+  protected synchronized void onNewStream() throws WindmillStreamShutdownException {
+    trySend(StreamingGetDataRequest.newBuilder().setHeader(jobHeader).build());
   }
 
   private long uniqueId() {
@@ -284,49 +320,25 @@ final class GrpcGetDataStream
   }
 
   @Override
-  protected void sendHealthCheck() throws WindmillStreamShutdownException {
-    if (hasPendingRequests()) {
+  protected synchronized void sendHealthCheck() throws WindmillStreamShutdownException {
+    if (currentPhysicalStream.hasPendingRequests()) {
       trySend(HEALTH_CHECK_REQUEST);
     }
   }
 
-  @Override
-  protected synchronized void shutdownInternal() {
-    // Stream has been explicitly closed. Drain pending input streams and request batches.
-    // Future calls to send RPCs will fail.
-    pending.values().forEach(AppendableInputStream::cancel);
-    pending.clear();
-    batches.forEach(
-        batch -> {
-          batch.markFinalized();
-          batch.notifyFailed();
-        });
-    batches.clear();
-  }
-
-  @Override
-  public void appendSpecificHtml(PrintWriter writer) {
-    writer.format(
-        "GetDataStream: %d queued batches, %d pending requests [", batches.size(), pending.size());
-    for (Map.Entry<Long, AppendableInputStream> entry : pending.entrySet()) {
-      writer.format("Stream %d ", entry.getKey());
-      if (entry.getValue().isCancelled()) {
-        writer.append("cancelled ");
-      }
-      if (entry.getValue().isComplete()) {
-        writer.append("complete ");
-      }
-      int queueSize = entry.getValue().size();
-      if (queueSize > 0) {
-        writer.format("%d queued responses ", queueSize);
-      }
-      long blockedMs = entry.getValue().getBlockedStartMs();
-      if (blockedMs > 0) {
-        writer.format("blocked for %dms", Instant.now().getMillis() - blockedMs);
-      }
-    }
-    writer.append("]");
-  }
+  // @Override
+  // protected synchronized void shutdownInternal() {
+  //   // Stream has been explicitly closed. Drain pending input streams and request batches.
+  //   // Future calls to send RPCs will fail.
+  //   pending.values().forEach(AppendableInputStream::cancel);
+  //   pending.clear();
+  //   batches.forEach(
+  //       batch -> {
+  //         batch.markFinalized();
+  //         batch.notifyFailed();
+  //       });
+  //   batches.clear();
+  // }
 
   private <ResponseT> ResponseT issueRequest(QueuedRequest request, ParseFn<ResponseT> parseFn)
       throws WindmillStreamShutdownException {
@@ -346,8 +358,6 @@ final class GrpcGetDataStream
         Thread.currentThread().interrupt();
         throwIfShutdown(request, e);
         throw new RuntimeException(e);
-      } finally {
-        pending.remove(request.id());
       }
     }
   }
@@ -397,13 +407,15 @@ final class GrpcGetDataStream
       // queue so that a subsequent batch will wait for its completion.
       synchronized (this) {
         if (isShutdown) {
+          batch.markFinalized();
+          batch.notifyFailed();
           throw shutdownExceptionFor(batch);
         }
 
         verify(batch == batches.peekFirst(), "GetDataStream request batch removed before send().");
         batch.markFinalized();
+        trySendBatch(batch);
       }
-      trySendBatch(batch);
     } else {
       // Wait for this batch to be sent before parsing the response.
       batch.waitForSendOrFailNotification();
@@ -449,7 +461,9 @@ final class GrpcGetDataStream
         // Map#put returns null if there was no previous mapping for the key, meaning we have not
         // seen it before.
         verify(
-            pending.put(request.id(), request.getResponseStream()) == null,
+            ((GetDataHandler) currentPhysicalStream)
+                    .pending.put(request.id(), request.getResponseStream())
+                == null,
             "Request already sent.");
       }
 

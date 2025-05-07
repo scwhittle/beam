@@ -27,8 +27,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
-import java.util.function.Supplier;
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverCancelledException;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
@@ -37,6 +38,7 @@ import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.vendor.grpc.v1p69p0.com.google.api.client.util.Sleeper;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.joda.time.DateTime;
 import org.joda.time.Instant;
@@ -84,9 +86,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   private final Set<AbstractWindmillStream<?, ?>> streamRegistry;
   private final int logEveryNStreamFailures;
   private final String backendWorkerToken;
+
+  private final Function<StreamObserver<ResponseT>, TerminatingStreamObserver<RequestT>>
+      physicalStreamFactory;
   private final ResettableThrowingStreamObserver<RequestT> requestObserver;
 
-  private final Supplier<TerminatingStreamObserver<RequestT>> requestObserverFactory;
   private final StreamDebugMetrics debugMetrics;
   private final AtomicBoolean isHealthCheckScheduled;
 
@@ -95,6 +99,19 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
 
   @GuardedBy("this")
   protected boolean isShutdown;
+
+  // The active physical grpc stream. trySend will send messages on the bi-directional stream
+  // associated with this handler. The instances are created by subclasses via newResponseHandler.
+  // Subclasses may wish to store additional per-physical stream state within the handler.
+  @GuardedBy("this")
+  protected PhysicalStreamHandler<ResponseT> currentPhysicalStream;
+
+  // Note that this is a concurrent hash set.
+  private Set<PhysicalStreamHandler<ResponseT>> closingPhysicalStreams;
+  // Generally the same as currentPhysicalStream, set under synchronization of this but can be read
+  // without.
+  private final AtomicReference<PhysicalStreamHandler<ResponseT>> currentPhysicalStreamForDebug =
+      new AtomicReference<>();
 
   @GuardedBy("this")
   private boolean started;
@@ -109,6 +126,9 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
       int logEveryNStreamFailures,
       String backendWorkerToken) {
     this.backendWorkerToken = backendWorkerToken;
+    this.physicalStreamFactory =
+        (StreamObserver<ResponseT> observer) -> streamObserverFactory.from(clientFactory, observer);
+    this.closingPhysicalStreams = Sets.newConcurrentHashSet();
     this.executor =
         Executors.newSingleThreadExecutor(
             new ThreadFactoryBuilder()
@@ -125,10 +145,6 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     this.finishLatch = new CountDownLatch(1);
     this.logger = logger;
     this.requestObserver = new ResettableThrowingStreamObserver<>(logger);
-    this.requestObserverFactory =
-        () ->
-            streamObserverFactory.from(
-                clientFactory, new AbstractWindmillStream<RequestT, ResponseT>.ResponseObserver());
     this.sleeper = Sleeper.DEFAULT;
     this.debugMetrics = StreamDebugMetrics.create();
   }
@@ -139,14 +155,32 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         : String.format("%s-WindmillStream-thread", streamType);
   }
 
-  /** Called on each response from the server. */
-  protected abstract void onResponse(ResponseT response);
+  /**
+   * Represents a physical grpc stream that is part of the logical windmill stream.
+   *
+   * @param <ResponseT>
+   */
+  protected interface PhysicalStreamHandler<ResponseT> {
 
-  /** Called when a new underlying stream to the server has been opened. */
+    /** Called on each response from the server. */
+    void onResponse(ResponseT response);
+
+    /** Returns whether there are any pending requests that should be retried on a stream break. */
+    boolean hasPendingRequests();
+
+    /** Called when the stream has finish. */
+    void onDone(Status status);
+
+    /**
+     * @implNote Don't require synchronization on AbstractWindmillStream.this, see the {@link
+     *     #appendSummaryHtml(PrintWriter)} comment.
+     */
+    void appendHtml(PrintWriter writer);
+  }
+
+  protected abstract PhysicalStreamHandler<ResponseT> newResponseHandler();
+
   protected abstract void onNewStream() throws WindmillStreamShutdownException;
-
-  /** Returns whether there are any pending requests that should be retried on a stream break. */
-  protected abstract boolean hasPendingRequests();
 
   /** Try to send a request to the server. Returns true if the request was successfully sent. */
   @CanIgnoreReturnValue
@@ -183,11 +217,16 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     // Add the stream to the registry after it has been fully constructed.
     streamRegistry.add(this);
     while (true) {
+      PhysicalStreamHandler<ResponseT> streamHandler = newResponseHandler();
       try {
         synchronized (this) {
           debugMetrics.recordStart();
-          requestObserver.reset(requestObserverFactory.get());
+          currentPhysicalStream = streamHandler;
+          currentPhysicalStreamForDebug.set(currentPhysicalStream);
+          requestObserver.reset(physicalStreamFactory.apply(new ResponseObserver(streamHandler)));
           onNewStream();
+          // XXX we need to make sure the error handling is correct here on exceptions, that all the
+          // requests on the stream are returned.
           if (clientClosed) {
             halfClose();
           }
@@ -274,7 +313,12 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
    *     status page rendering.
    */
   public final void appendSummaryHtml(PrintWriter writer) {
-    appendSpecificHtml(writer);
+    @Nullable PhysicalStreamHandler<ResponseT> currentHandler = currentPhysicalStreamForDebug.get();
+    if (currentHandler != null) {
+      currentHandler.appendHtml(writer);
+    }
+    closingPhysicalStreams.forEach((closingHandler) -> closingHandler.appendHtml(writer));
+
     StreamDebugMetrics.Snapshot summaryMetrics = debugMetrics.getSummaryMetrics();
     summaryMetrics
         .restartMetrics()
@@ -305,12 +349,6 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         requestObserver.isClosed(),
         summaryMetrics.shutdownTime().map(DateTime::toString).orElse(NOT_SHUTDOWN));
   }
-
-  /**
-   * @implNote Don't require synchronization on stream, see the {@link
-   *     #appendSummaryHtml(PrintWriter)} comment.
-   */
-  protected abstract void appendSpecificHtml(PrintWriter writer);
 
   @Override
   public final synchronized void halfClose() {
@@ -352,16 +390,18 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
       if (!isShutdown) {
         isShutdown = true;
         debugMetrics.recordShutdown();
-        shutdownInternal();
+
+        // XXX we need to ensure that errors from the streams leads to cancellation of everything
+        // after shutdown.
+        // shutdownInternal();
       }
     }
   }
 
-  protected abstract void shutdownInternal();
-
   /** Returns true if the stream was torn down and should not be restarted internally. */
   private synchronized boolean maybeTearDownStream() {
-    if (isShutdown || (clientClosed && !hasPendingRequests())) {
+    if (isShutdown || (clientClosed && !currentPhysicalStream.hasPendingRequests())) {
+      // XXX this may need to wait for all other streams to drain.
       streamRegistry.remove(AbstractWindmillStream.this);
       finishLatch.countDown();
       executor.shutdownNow();
@@ -372,6 +412,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   }
 
   private class ResponseObserver implements StreamObserver<ResponseT> {
+    private final PhysicalStreamHandler<ResponseT> handler;
+
+    ResponseObserver(PhysicalStreamHandler<ResponseT> handler) {
+      this.handler = handler;
+    }
 
     @Override
     public void onNext(ResponseT response) {
@@ -381,18 +426,29 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         // Ignore.
       }
       debugMetrics.recordResponse();
-      onResponse(response);
+      handler.onResponse(response);
     }
 
     @Override
     public void onError(Throwable t) {
-      if (maybeTearDownStream()) {
-        return;
-      }
+      executeSafely(() -> onPhysicalStreamCompletion(Status.fromThrowable(t), handler));
+    }
 
-      Status errorStatus = Status.fromThrowable(t);
-      recordStreamStatus(errorStatus);
+    @Override
+    public void onCompleted() {
+      executeSafely(() -> onPhysicalStreamCompletion(OK_STATUS, handler));
+    }
+  }
 
+  private void onPhysicalStreamCompletion(Status status, PhysicalStreamHandler<ResponseT> handler) {
+    if (maybeTearDownStream()) {
+      return;
+    }
+
+    recordStreamRestart(status);
+    handler.onDone(status);
+    // Backoff on errors.;
+    if (!status.isOk()) {
       try {
         long sleep = backoff.nextBackOffMillis();
         debugMetrics.recordSleep(sleep);
@@ -403,54 +459,43 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
       } catch (IOException e) {
         // Ignore.
       }
-
-      executeSafely(AbstractWindmillStream.this::startStream);
     }
 
-    @Override
-    public void onCompleted() {
-      if (maybeTearDownStream()) {
-        return;
-      }
-      recordStreamStatus(OK_STATUS);
-      executeSafely(AbstractWindmillStream.this::startStream);
-    }
+    startStream();
+  }
 
-    private void recordStreamStatus(Status status) {
-      int currentRestartCount = debugMetrics.incrementAndGetRestarts();
-      if (status.isOk()) {
-        String restartReason =
-            "Stream completed successfully but did not complete requested operations, "
-                + "recreating";
-        logger.warn(restartReason);
-        debugMetrics.recordRestartReason(restartReason);
-      } else {
-        int currentErrorCount = debugMetrics.incrementAndGetErrors();
-        debugMetrics.recordRestartReason(status.toString());
-        Throwable t = status.getCause();
-        if (t instanceof StreamObserverCancelledException) {
-          logger.error(
-              "StreamObserver was unexpectedly cancelled for stream={}, worker={}. stacktrace={}",
-              getClass(),
-              backendWorkerToken,
-              t.getStackTrace(),
-              t);
-        } else if (currentRestartCount % logEveryNStreamFailures == 0) {
-          // Don't log every restart since it will get noisy, and many errors transient.
-          long nowMillis = Instant.now().getMillis();
-          logger.debug(
-              "{} has been restarted {} times. Streaming Windmill RPC Error Count: {}; last was: {}"
-                  + " with status: {}. created {}ms ago; {}. This is normal with autoscaling.",
-              AbstractWindmillStream.this.getClass(),
-              currentRestartCount,
-              currentErrorCount,
-              t,
-              status,
-              nowMillis - debugMetrics.getStartTimeMs(),
-              debugMetrics
-                  .responseDebugString(nowMillis)
-                  .orElse(NEVER_RECEIVED_RESPONSE_LOG_STRING));
-        }
+  private void recordStreamRestart(Status status) {
+    int currentRestartCount = debugMetrics.incrementAndGetRestarts();
+    if (status.isOk()) {
+      String restartReason =
+          "Stream completed successfully but did not complete requested operations, "
+              + "recreating";
+      logger.warn(restartReason);
+      debugMetrics.recordRestartReason(restartReason);
+    } else {
+      int currentErrorCount = debugMetrics.incrementAndGetErrors();
+      debugMetrics.recordRestartReason(status.toString());
+      Throwable t = status.getCause();
+      if (t instanceof StreamObserverCancelledException) {
+        logger.error(
+            "StreamObserver was unexpectedly cancelled for stream={}, worker={}. stacktrace={}",
+            getClass(),
+            backendWorkerToken,
+            t.getStackTrace(),
+            t);
+      } else if (currentRestartCount % logEveryNStreamFailures == 0) {
+        // Don't log every restart since it will get noisy, and many errors transient.
+        long nowMillis = Instant.now().getMillis();
+        logger.debug(
+            "{} has been restarted {} times. Streaming Windmill RPC Error Count: {}; last was: {}"
+                + " with status: {}. created {}ms ago; {}. This is normal with autoscaling.",
+            AbstractWindmillStream.this.getClass(),
+            currentRestartCount,
+            currentErrorCount,
+            t,
+            status,
+            nowMillis - debugMetrics.getStartTimeMs(),
+            debugMetrics.responseDebugString(nowMillis).orElse(NEVER_RECEIVED_RESPONSE_LOG_STRING));
       }
     }
   }

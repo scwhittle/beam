@@ -22,7 +22,6 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 import com.google.auto.value.AutoValue;
 import java.io.PrintWriter;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,6 +43,7 @@ import org.apache.beam.runners.dataflow.worker.windmill.client.WindmillStreamShu
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.EvictingQueue;
@@ -57,7 +57,6 @@ final class GrpcCommitWorkStream
 
   private static final long HEARTBEAT_REQUEST_ID = Long.MAX_VALUE;
 
-  private final ConcurrentMap<Long, PendingRequest> pending;
   private final AtomicLong idGenerator;
   private final JobHeader jobHeader;
   private final int streamingRpcBatchLimit;
@@ -82,7 +81,6 @@ final class GrpcCommitWorkStream
         streamRegistry,
         logEveryNStreamFailures,
         backendWorkerToken);
-    pending = new ConcurrentHashMap<>();
     this.idGenerator = idGenerator;
     this.jobHeader = jobHeader;
     this.streamingRpcBatchLimit = streamingRpcBatchLimit;
@@ -112,21 +110,8 @@ final class GrpcCommitWorkStream
   }
 
   @Override
-  public void appendSpecificHtml(PrintWriter writer) {
-    writer.format("CommitWorkStream: %d pending", pending.size());
-  }
-
-  @Override
   protected synchronized void onNewStream() throws WindmillStreamShutdownException {
     trySend(StreamingCommitWorkRequest.newBuilder().setHeader(jobHeader).build());
-    try (Batcher resendBatcher = new Batcher()) {
-      for (Map.Entry<Long, PendingRequest> entry : pending.entrySet()) {
-        if (!resendBatcher.canAccept(entry.getValue().getBytes())) {
-          resendBatcher.flush();
-        }
-        resendBatcher.add(entry.getKey(), entry.getValue());
-      }
-    }
   }
 
   /**
@@ -139,66 +124,96 @@ final class GrpcCommitWorkStream
   }
 
   @Override
-  protected boolean hasPendingRequests() {
-    return !pending.isEmpty();
-  }
-
-  @Override
-  protected void sendHealthCheck() throws WindmillStreamShutdownException {
-    if (hasPendingRequests()) {
+  protected synchronized void sendHealthCheck() throws WindmillStreamShutdownException {
+    if (currentPhysicalStream.hasPendingRequests()) {
       StreamingCommitWorkRequest.Builder builder = StreamingCommitWorkRequest.newBuilder();
       builder.addCommitChunkBuilder().setRequestId(HEARTBEAT_REQUEST_ID);
       trySend(builder.build());
     }
   }
 
-  @Override
-  protected void onResponse(StreamingCommitResponse response) {
-    CommitCompletionFailureHandler failureHandler = new CommitCompletionFailureHandler();
-    for (int i = 0; i < response.getRequestIdCount(); ++i) {
-      long requestId = response.getRequestId(i);
-      if (requestId == HEARTBEAT_REQUEST_ID) {
-        continue;
-      }
+  private class CommitStreamHandler implements PhysicalStreamHandler<StreamingCommitResponse> {
+    private final ConcurrentMap<Long, PendingRequest> pending = new ConcurrentHashMap<>();
 
-      // From windmill.proto: Indices must line up with the request_id field, but trailing OKs may
-      // be omitted.
-      CommitStatus commitStatus =
-          i < response.getStatusCount() ? response.getStatus(i) : CommitStatus.OK;
-
-      @Nullable PendingRequest pendingRequest = pending.remove(requestId);
-      if (pendingRequest == null) {
-        synchronized (this) {
-          if (!isShutdown) {
-            // Missing responses are expected after shutdown() because it removes them.
-            LOG.error("Got unknown commit request ID: {}", requestId);
-          }
+    @Override
+    public void onResponse(StreamingCommitResponse response) {
+      CommitCompletionFailureHandler failureHandler = new CommitCompletionFailureHandler();
+      for (int i = 0; i < response.getRequestIdCount(); ++i) {
+        long requestId = response.getRequestId(i);
+        if (requestId == HEARTBEAT_REQUEST_ID) {
+          continue;
         }
-      } else {
+
+        // From windmill.proto: Indices must line up with the request_id field, but trailing OKs
+        // may
+        // be omitted.
+        CommitStatus commitStatus =
+            i < response.getStatusCount() ? response.getStatus(i) : CommitStatus.OK;
+
+        @Nullable PendingRequest pendingRequest = pending.remove(requestId);
+        if (pendingRequest == null) {
+          LOG.error("Got unknown commit request ID: {}", requestId);
+          continue;
+        }
         try {
           pendingRequest.completeWithStatus(commitStatus);
         } catch (RuntimeException e) {
-          // Catch possible exceptions to ensure that an exception for one commit does not prevent
+          // Catch possible exceptions to ensure that an exception for one commit does not
+          // prevent
           // other commits from being processed. Aggregate all the failures to throw after
           // processing the response if they exist.
           LOG.warn("Exception while processing commit response.", e);
           failureHandler.addError(commitStatus, e);
         }
       }
+
+      failureHandler.throwIfNonEmpty();
     }
 
-    failureHandler.throwIfNonEmpty();
+    @Override
+    public boolean hasPendingRequests() {
+      return !pending.isEmpty();
+    }
+
+    @Override
+    public void onDone(Status status) {
+      if (pending.isEmpty()) {
+        return;
+      }
+      if (status.isOk()) {
+        LOG.warn("Unexpected requests without responses on drained physical stream, retrying.");
+      }
+      try (Batcher resendBatcher = new Batcher()) {
+        for (Map.Entry<Long, PendingRequest> entry : pending.entrySet()) {
+          if (!resendBatcher.canAccept(entry.getValue().getBytes())) {
+            resendBatcher.flush();
+          }
+          resendBatcher.add(entry.getKey(), entry.getValue());
+        }
+      }
+    }
+
+    @Override
+    public void appendHtml(PrintWriter writer) {
+      writer.format("CommitWorkStream: %d pending", pending.size());
+    }
   }
 
   @Override
-  protected void shutdownInternal() {
-    Iterator<PendingRequest> pendingRequests = pending.values().iterator();
-    while (pendingRequests.hasNext()) {
-      PendingRequest pendingRequest = pendingRequests.next();
-      pendingRequest.abort();
-      pendingRequests.remove();
-    }
+  protected PhysicalStreamHandler<StreamingCommitResponse> newResponseHandler() {
+    return new CommitStreamHandler();
   }
+
+  // XXX can this be removed and just rely on the error handling in trySend?
+  // @Override
+  // protected void shutdownInternal() {
+  //   Iterator<PendingRequest> pendingRequests = pending.values().iterator();
+  //   while (pendingRequests.hasNext()) {
+  //     PendingRequest pendingRequest = pendingRequests.next();
+  //     pendingRequest.abort();
+  //     pendingRequests.remove();
+  //   }
+  // }
 
   private void flushInternal(Map<Long, PendingRequest> requests)
       throws WindmillStreamShutdownException {
@@ -303,7 +318,7 @@ final class GrpcCommitWorkStream
   /** Returns true if prepare for send succeeded. */
   private synchronized boolean prepareForSend(long id, PendingRequest request) {
     if (!isShutdown) {
-      pending.put(id, request);
+      ((CommitStreamHandler) currentPhysicalStream).pending.put(id, request);
       return true;
     }
     return false;
@@ -312,7 +327,7 @@ final class GrpcCommitWorkStream
   /** Returns true if prepare for send succeeded. */
   private synchronized boolean prepareForSend(Map<Long, PendingRequest> requests) {
     if (!isShutdown) {
-      pending.putAll(requests);
+      ((CommitStreamHandler) currentPhysicalStream).pending.putAll(requests);
       return true;
     }
     return false;

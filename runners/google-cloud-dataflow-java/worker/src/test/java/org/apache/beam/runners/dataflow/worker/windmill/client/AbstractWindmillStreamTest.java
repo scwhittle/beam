@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
 import org.apache.beam.sdk.util.FluentBackoff;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.CallStreamObserver;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
@@ -156,17 +157,31 @@ public class AbstractWindmillStreamTest {
           "Test");
     }
 
+    private static class TestHandler implements PhysicalStreamHandler<Integer> {
+
+      @Override
+      public void onResponse(Integer response) {}
+
+      @Override
+      public boolean hasPendingRequests() {
+        return false;
+      }
+
+      @Override
+      public void onDone(Status status) {}
+
+      @Override
+      public void appendHtml(PrintWriter writer) {}
+    }
+
     @Override
-    protected void onResponse(Integer response) {}
+    protected PhysicalStreamHandler<Integer> newResponseHandler() {
+      return new TestHandler();
+    }
 
     @Override
     protected void onNewStream() {
       numStarts.incrementAndGet();
-    }
-
-    @Override
-    protected boolean hasPendingRequests() {
-      return false;
     }
 
     private void testSend() throws WindmillStreamShutdownException {
@@ -189,12 +204,6 @@ public class AbstractWindmillStreamTest {
         Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
       }
     }
-
-    @Override
-    protected void appendSpecificHtml(PrintWriter writer) {}
-
-    @Override
-    protected void shutdownInternal() {}
   }
 
   private static class TestCallStreamObserver extends CallStreamObserver<Integer> {
