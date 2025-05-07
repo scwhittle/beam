@@ -153,41 +153,46 @@ final class GrpcCommitWorkStream
   }
 
   @Override
-  protected void onResponse(StreamingCommitResponse response) {
-    CommitCompletionFailureHandler failureHandler = new CommitCompletionFailureHandler();
-    for (int i = 0; i < response.getRequestIdCount(); ++i) {
-      long requestId = response.getRequestId(i);
-      if (requestId == HEARTBEAT_REQUEST_ID) {
-        continue;
-      }
+  protected PhysicalStreamHandler<StreamingCommitResponse> newResponseHandler() {
+    return new PhysicalStreamHandler<StreamingCommitResponse>() {
+      @Override
+      public void onResponse(StreamingCommitResponse response) {
+        CommitCompletionFailureHandler failureHandler = new CommitCompletionFailureHandler();
+        for (int i = 0; i < response.getRequestIdCount(); ++i) {
+          long requestId = response.getRequestId(i);
+          if (requestId == HEARTBEAT_REQUEST_ID) {
+            continue;
+          }
 
-      // From windmill.proto: Indices must line up with the request_id field, but trailing OKs may
-      // be omitted.
-      CommitStatus commitStatus =
-          i < response.getStatusCount() ? response.getStatus(i) : CommitStatus.OK;
+          // From windmill.proto: Indices must line up with the request_id field, but trailing OKs may
+          // be omitted.
+          CommitStatus commitStatus =
+              i < response.getStatusCount() ? response.getStatus(i) : CommitStatus.OK;
 
-      @Nullable PendingRequest pendingRequest = pending.remove(requestId);
-      if (pendingRequest == null) {
-        synchronized (this) {
-          if (!isShutdown) {
-            // Missing responses are expected after shutdown() because it removes them.
-            LOG.error("Got unknown commit request ID: {}", requestId);
+          @Nullable PendingRequest pendingRequest = pending.remove(requestId);
+          if (pendingRequest == null) {
+            synchronized (this) {
+              if (!isShutdown) {
+                // Missing responses are expected after shutdown() because it removes them.
+                LOG.error("Got unknown commit request ID: {}", requestId);
+              }
+            }
+          } else {
+            try {
+              pendingRequest.completeWithStatus(commitStatus);
+            } catch (RuntimeException e) {
+              // Catch possible exceptions to ensure that an exception for one commit does not prevent
+              // other commits from being processed. Aggregate all the failures to throw after
+              // processing the response if they exist.
+              LOG.warn("Exception while processing commit response.", e);
+              failureHandler.addError(commitStatus, e);
+            }
           }
         }
-      } else {
-        try {
-          pendingRequest.completeWithStatus(commitStatus);
-        } catch (RuntimeException e) {
-          // Catch possible exceptions to ensure that an exception for one commit does not prevent
-          // other commits from being processed. Aggregate all the failures to throw after
-          // processing the response if they exist.
-          LOG.warn("Exception while processing commit response.", e);
-          failureHandler.addError(commitStatus, e);
-        }
-      }
-    }
 
-    failureHandler.throwIfNonEmpty();
+        failureHandler.throwIfNonEmpty();
+      }
+    };
   }
 
   @Override

@@ -20,6 +20,7 @@ package org.apache.beam.runners.dataflow.worker.windmill.client;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -83,6 +84,7 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   private final int logEveryNStreamFailures;
   private final String backendWorkerToken;
   private final ResettableThrowingStreamObserver<RequestT> requestObserver;
+
   private final StreamDebugMetrics debugMetrics;
   private final AtomicBoolean isHealthCheckScheduled;
 
@@ -91,6 +93,15 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
 
   @GuardedBy("this")
   protected boolean isShutdown;
+
+  // The active physical grpc stream. trySend will send messages on the bi-directional stream
+  // associated with this handler. The instances are created by subclasses via newResponseHandler.
+  // Subclasses may wish to store additional per-physical stream state within the handler.
+  @GuardedBy("this")
+  protected PhysicalStreamHandler<ResponseT> currentPhysicalStream;
+
+  @GuardedBy("this")
+  protected HashSet<PhysicalStreamHandler<ResponseT>> closingPhysicalStreams;
 
   @GuardedBy("this")
   private boolean started;
@@ -120,13 +131,7 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     this.isHealthCheckScheduled = new AtomicBoolean(false);
     this.finishLatch = new CountDownLatch(1);
     this.logger = logger;
-    this.requestObserver =
-        new ResettableThrowingStreamObserver<>(
-            () ->
-                streamObserverFactory.from(
-                    clientFactory,
-                    new AbstractWindmillStream<RequestT, ResponseT>.ResponseObserver()),
-            logger);
+    this.requestObserver = new ResettableThrowingStreamObserver<>(logger);
     this.sleeper = Sleeper.DEFAULT;
     this.debugMetrics = StreamDebugMetrics.create();
   }
@@ -137,10 +142,15 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         : String.format("%s-WindmillStream-thread", streamType);
   }
 
-  /** Called on each response from the server. */
-  protected abstract void onResponse(ResponseT response);
+  protected interface PhysicalStreamHandler<ResponseT> {
 
-  /** Called when a new underlying stream to the server has been opened. */
+    /** Called on each response from the server. */
+    void onResponse(ResponseT response);
+  }
+  protected abstract PhysicalStreamHandler<ResponseT> newResponseHandler();
+
+  /** Called when a new underlying physical stream to the server has been opened.
+   * Subclasses should return a newly created PhysicalStreamHandle to consume responses. */
   protected abstract void onNewStream() throws WindmillStreamShutdownException;
 
   /** Returns whether there are any pending requests that should be retried on a stream break. */
@@ -181,11 +191,15 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     // Add the stream to the registry after it has been fully constructed.
     streamRegistry.add(this);
     while (true) {
+      PhysicalStreamHandler<ResponseT> streamHandler = newResponseHandler();
       try {
         synchronized (this) {
           debugMetrics.recordStart();
-          requestObserver.reset();
+          currentPhysicalStream = streamHandler;
+          requestObserver.reset(new ResponseObserver(streamHandler));
           onNewStream();
+          // XXX we need to make sure the error handling is correct here on exceptions, that all the
+          // requests on the stream are returned.
           if (clientClosed) {
             halfClose();
           }
