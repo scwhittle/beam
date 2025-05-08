@@ -142,19 +142,37 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         : String.format("%s-WindmillStream-thread", streamType);
   }
 
+  /** Represents a physical grpc stream that is part of the logical windmill stream.
+   *
+   * @param <ResponseT>
+   */
   protected interface PhysicalStreamHandler<ResponseT> {
 
     /** Called on each response from the server. */
     void onResponse(ResponseT response);
+
+    /** Returns whether there are any pending requests that should be retried on a stream break. */
+    boolean hasPendingRequests();
+
+    /** Called when the stream has finish successfully. after half-closing.
+     * Implementations should verify that all expected responses were observed.
+     */
+    void onSuccess();
+
+    /** Called when the physical stream encountered an error.
+     * Implementations should ensure that all unresponsed requests are retried by
+     * using trySend() or surface errors as necessary to callers.
+     */
+    void onSuccess();
   }
   protected abstract PhysicalStreamHandler<ResponseT> newResponseHandler();
 
-  /** Called when a new underlying physical stream to the server has been opened.
-   * Subclasses should return a newly created PhysicalStreamHandle to consume responses. */
-  protected abstract void onNewStream() throws WindmillStreamShutdownException;
-
-  /** Returns whether there are any pending requests that should be retried on a stream break. */
-  protected abstract boolean hasPendingRequests();
+  /**
+   * Called when the client side stream is throttled due to resource exhausted errors. Will be
+   * called for each resource exhausted error not just the first. onResponse() must stop throttling
+   * on receipt of the first good message.
+   */
+  protected abstract void startThrottleTimer();
 
   /** Try to send a request to the server. Returns true if the request was successfully sent. */
   @CanIgnoreReturnValue
