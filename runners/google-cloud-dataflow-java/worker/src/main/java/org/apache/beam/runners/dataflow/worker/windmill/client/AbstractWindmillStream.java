@@ -163,16 +163,9 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
      * Implementations should ensure that all unresponsed requests are retried by
      * using trySend() or surface errors as necessary to callers.
      */
-    void onSuccess();
+    void onError();
   }
   protected abstract PhysicalStreamHandler<ResponseT> newResponseHandler();
-
-  /**
-   * Called when the client side stream is throttled due to resource exhausted errors. Will be
-   * called for each resource exhausted error not just the first. onResponse() must stop throttling
-   * on receipt of the first good message.
-   */
-  protected abstract void startThrottleTimer();
 
   /** Try to send a request to the server. Returns true if the request was successfully sent. */
   @CanIgnoreReturnValue
@@ -402,6 +395,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   }
 
   private class ResponseObserver implements StreamObserver<ResponseT> {
+    private final PhysicalStreamHandler<ResponseT> handler;
+
+    ResponseObserver(PhysicalStreamHandler<ResponseT> handler) {
+      this.handler = handler;
+    }
 
     @Override
     public void onNext(ResponseT response) {
@@ -411,18 +409,29 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         // Ignore.
       }
       debugMetrics.recordResponse();
-      onResponse(response);
+      handler.onResponse(response);
     }
 
     @Override
     public void onError(Throwable t) {
+      executeSafely(onPhysicalStreamCompletion(Status.fromThrowable(t), handler););
+    }
+
+    @Override
+    public void onCompleted() {
+      executeSafely(onPhysicalStreamCompletion(OK_STATUS, handler););
+    }
+  }
+
+  private void onPhysicalStreamCompletion(@Nullable Status status,
+                                          PhysicalStreamHandler<ResponseT> handler) {
       if (maybeTearDownStream()) {
         return;
       }
 
-      Status errorStatus = Status.fromThrowable(t);
-      recordStreamStatus(errorStatus);
-
+    recordStreamRestart(status)
+    // Backoff on errors.;
+    if (!status.isOk()) {
       try {
         long sleep = backoff.nextBackOffMillis();
         debugMetrics.recordSleep(sleep);
@@ -433,20 +442,13 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
       } catch (IOException e) {
         // Ignore.
       }
-
-      executeSafely(AbstractWindmillStream.this::startStream);
     }
 
-    @Override
-    public void onCompleted() {
-      if (maybeTearDownStream()) {
-        return;
-      }
-      recordStreamStatus(OK_STATUS);
-      executeSafely(AbstractWindmillStream.this::startStream);
-    }
+    startStream();
+  }
 
-    private void recordStreamStatus(Status status) {
+
+    private void recordStreamRestart(Status status) {
       int currentRestartCount = debugMetrics.incrementAndGetRestarts();
       if (status.isOk()) {
         String restartReason =
