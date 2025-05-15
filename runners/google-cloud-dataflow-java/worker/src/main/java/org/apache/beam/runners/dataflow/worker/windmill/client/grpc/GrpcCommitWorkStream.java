@@ -61,6 +61,8 @@ final class GrpcCommitWorkStream
   private final JobHeader jobHeader;
   private final int streamingRpcBatchLimit;
 
+  private final ConcurrentMap<Long, PendingRequest> pending = new ConcurrentHashMap<>();
+
   private GrpcCommitWorkStream(
       String backendWorkerToken,
       Function<StreamObserver<StreamingCommitResponse>, StreamObserver<StreamingCommitWorkRequest>>
