@@ -35,7 +35,6 @@ import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.St
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.TerminatingStreamObserver;
 import org.apache.beam.sdk.util.BackOff;
-import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.vendor.grpc.v1p69p0.com.google.api.client.util.Sleeper;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
@@ -108,7 +107,8 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   protected PhysicalStreamHandler<ResponseT> currentPhysicalStream;
 
   // Note that this is a concurrent hash set.
-  private Set<PhysicalStreamHandler<ResponseT>> closingPhysicalStreams;
+  protected final Set<PhysicalStreamHandler<ResponseT>> closingPhysicalStreams;
+
   // Generally the same as currentPhysicalStream, set under synchronization of this but can be read
   // without.
   private final AtomicReference<PhysicalStreamHandler<ResponseT>> currentPhysicalStreamForDebug =
@@ -169,7 +169,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     /** Returns whether there are any pending requests that should be retried on a stream break. */
     boolean hasPendingRequests();
 
-    /** Called when the stream has finish. */
+    /**
+     * Called when the physical stream has finished. For streams with requests that should be
+     * retried, requests should be moved to parent state so that it is captured by the next
+     * flushPendingToStream call.
+     */
     void onDone(Status status);
 
     /**
@@ -214,8 +218,7 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   }
 
   /** Starts the underlying stream. */
-  private void startStream(@Nullable PhysicalStreamHandler<ResponseT> previousHandler,
-      @Nullable Status previousHandlerStatus) {
+  private void startStream() {
     // Add the stream to the registry after it has been fully constructed.
     streamRegistry.add(this);
     while (true) {
@@ -227,12 +230,6 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
           currentPhysicalStreamForDebug.set(currentPhysicalStream);
           requestObserver.reset(physicalStreamFactory.apply(new ResponseObserver(streamHandler)));
           onNewStream();
-          if (previousHandler != null) {
-            Preconditions.checkArgumentNotNull(previousHandlerStatus)
-            previousHandler.onDone(previousHandlerStatus);
-          }
-          // XXX we need to make sure the error handling is correct here on exceptions, that all the
-          // requests on the stream are returned.
           if (clientClosed) {
             halfClose();
           }
@@ -396,13 +393,12 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
       if (!isShutdown) {
         isShutdown = true;
         debugMetrics.recordShutdown();
-
-        // XXX we need to ensure that errors from the streams leads to cancellation of everything
-        // after shutdown.
-        // shutdownInternal();
+        shutdownInternal();
       }
     }
   }
+
+  protected synchronized void shutdownInternal() {}
 
   /** Returns true if the stream was torn down and should not be restarted internally. */
   private synchronized boolean maybeTearDownStream() {
@@ -447,6 +443,7 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   }
 
   private void onPhysicalStreamCompletion(Status status, PhysicalStreamHandler<ResponseT> handler) {
+    handler.onDone(status);
     if (maybeTearDownStream()) {
       return;
     }
@@ -463,12 +460,8 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         // Ignore.
       }
     }
-
     recordStreamRestart(status);
-    synchronized (this) {
-      startStream();
-      handler.onDone(status);
-    }
+    startStream();
   }
 
   private void recordStreamRestart(Status status) {
