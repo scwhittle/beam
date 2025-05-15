@@ -35,6 +35,7 @@ import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.St
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.TerminatingStreamObserver;
 import org.apache.beam.sdk.util.BackOff;
+import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.vendor.grpc.v1p69p0.com.google.api.client.util.Sleeper;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
@@ -213,7 +214,8 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   }
 
   /** Starts the underlying stream. */
-  private void startStream() {
+  private void startStream(@Nullable PhysicalStreamHandler<ResponseT> previousHandler,
+      @Nullable Status previousHandlerStatus) {
     // Add the stream to the registry after it has been fully constructed.
     streamRegistry.add(this);
     while (true) {
@@ -225,6 +227,10 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
           currentPhysicalStreamForDebug.set(currentPhysicalStream);
           requestObserver.reset(physicalStreamFactory.apply(new ResponseObserver(streamHandler)));
           onNewStream();
+          if (previousHandler != null) {
+            Preconditions.checkArgumentNotNull(previousHandlerStatus)
+            previousHandler.onDone(previousHandlerStatus);
+          }
           // XXX we need to make sure the error handling is correct here on exceptions, that all the
           // requests on the stream are returned.
           if (clientClosed) {
@@ -444,9 +450,6 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     if (maybeTearDownStream()) {
       return;
     }
-
-    recordStreamRestart(status);
-    handler.onDone(status);
     // Backoff on errors.;
     if (!status.isOk()) {
       try {
@@ -461,7 +464,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
       }
     }
 
-    startStream();
+    recordStreamRestart(status);
+    synchronized (this) {
+      startStream();
+      handler.onDone(status);
+    }
   }
 
   private void recordStreamRestart(Status status) {
