@@ -38,7 +38,6 @@ import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.vendor.grpc.v1p69p0.com.google.api.client.util.Sleeper;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.joda.time.DateTime;
 import org.joda.time.Instant;
@@ -104,10 +103,7 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   // associated with this handler. The instances are created by subclasses via newResponseHandler.
   // Subclasses may wish to store additional per-physical stream state within the handler.
   @GuardedBy("this")
-  protected PhysicalStreamHandler<ResponseT> currentPhysicalStream;
-
-  // Note that this is a concurrent hash set.
-  protected final Set<PhysicalStreamHandler<ResponseT>> closingPhysicalStreams;
+  protected @Nullable PhysicalStreamHandler<ResponseT> currentPhysicalStream;
 
   // Generally the same as currentPhysicalStream, set under synchronization of this but can be read
   // without.
@@ -129,7 +125,6 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     this.backendWorkerToken = backendWorkerToken;
     this.physicalStreamFactory =
         (StreamObserver<ResponseT> observer) -> streamObserverFactory.from(clientFactory, observer);
-    this.closingPhysicalStreams = Sets.newConcurrentHashSet();
     this.executor =
         Executors.newSingleThreadExecutor(
             new ThreadFactoryBuilder()
@@ -320,7 +315,6 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     if (currentHandler != null) {
       currentHandler.appendHtml(writer);
     }
-    closingPhysicalStreams.forEach((closingHandler) -> closingHandler.appendHtml(writer));
 
     StreamDebugMetrics.Snapshot summaryMetrics = debugMetrics.getSummaryMetrics();
     summaryMetrics
@@ -401,9 +395,10 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   protected synchronized void shutdownInternal() {}
 
   /** Returns true if the stream was torn down and should not be restarted internally. */
-  private synchronized boolean maybeTearDownStream() {
-    if (isShutdown || (clientClosed && !currentPhysicalStream.hasPendingRequests())) {
-      // XXX this may need to wait for all other streams to drain.
+  private synchronized boolean maybeTearDownStream(PhysicalStreamHandler<ResponseT> doneStream) {
+    if (isShutdown || (clientClosed && !doneStream.hasPendingRequests())) {
+      // Once we have background closing physicalStreams we will need to improve this to wait for
+      // all of the work of the logical stream to be complete.
       streamRegistry.remove(AbstractWindmillStream.this);
       finishLatch.countDown();
       executor.shutdownNow();
@@ -443,8 +438,18 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   }
 
   private void onPhysicalStreamCompletion(Status status, PhysicalStreamHandler<ResponseT> handler) {
+    // XXX the problem with this is that we complete requests in getdata stream and they
+    // then are retried on the same physicalstreamhandler.
+    // IDEA: what if we change send to block for the new physical stream to be ready?
+    // since send blocks anyway we could just block there waiting for the backoff to occur.
+    synchronized (this) {
+      if (currentPhysicalStream == handler) {
+        currentPhysicalStreamForDebug.set(null);
+        currentPhysicalStream = null;
+      }
+    }
     handler.onDone(status);
-    if (maybeTearDownStream()) {
+    if (maybeTearDownStream(handler)) {
       return;
     }
     // Backoff on errors.;

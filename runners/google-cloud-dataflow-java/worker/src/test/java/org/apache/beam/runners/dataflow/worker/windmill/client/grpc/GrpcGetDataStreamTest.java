@@ -48,7 +48,6 @@ import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.util.MutableHandlerRegistry;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
@@ -146,7 +145,6 @@ public class GrpcGetDataStreamTest {
   }
 
   @Test
-  @Ignore("https://github.com/apache/beam/issues/28957")
   public void testRequestKeyedData_sendOnShutdownStreamThrowsWindmillStreamShutdownException() {
     GetDataStreamTestStub testStub =
         new GetDataStreamTestStub(new TestGetDataStreamRequestObserver());

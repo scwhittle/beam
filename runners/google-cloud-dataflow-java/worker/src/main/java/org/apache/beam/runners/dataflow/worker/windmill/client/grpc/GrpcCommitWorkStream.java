@@ -18,6 +18,7 @@
 package org.apache.beam.runners.dataflow.worker.windmill.client.grpc;
 
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.value.AutoValue;
 import java.io.PrintWriter;
@@ -117,17 +118,16 @@ final class GrpcCommitWorkStream
   @Override
   protected synchronized void onNewStream() throws WindmillStreamShutdownException {
     trySend(StreamingCommitWorkRequest.newBuilder().setHeader(jobHeader).build());
-    // Flush all pending requests that are no longer on an active or closing stream.
+    // Flush all pending requests that are no longer on active streams.
     try (Batcher resendBatcher = new Batcher()) {
       for (Map.Entry<Long, KV<CommitStreamHandler, PendingRequest>> entry : pending.entrySet()) {
         CommitStreamHandler requestHandler = entry.getValue().getKey();
-        if (requestHandler == currentPhysicalStream
-            || closingPhysicalStreams.contains(requestHandler)) {
-          continue;
-        }
+        checkState(requestHandler != currentPhysicalStream);
+        // When we have streams closing in the background we should avoid retrying the requests
+        // active on those streams.
+
         long id = entry.getKey();
         PendingRequest request = entry.getValue().getValue();
-        pending.put(id, KV.of((CommitStreamHandler) currentPhysicalStream, request));
         if (!resendBatcher.canAccept(request.getBytes())) {
           resendBatcher.flush();
         }

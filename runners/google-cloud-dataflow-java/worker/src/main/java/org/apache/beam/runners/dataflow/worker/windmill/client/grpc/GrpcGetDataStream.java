@@ -56,8 +56,12 @@ import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.GrpcGetDataS
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.GrpcGetDataStreamRequests.QueuedRequest;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
 import org.apache.beam.sdk.util.BackOff;
+import org.apache.beam.sdk.util.BackOffUtils;
+import org.apache.beam.sdk.util.FluentBackoff;
+import org.apache.beam.sdk.util.Sleeper;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,6 +73,11 @@ final class GrpcGetDataStream
   private static final Logger LOG = LoggerFactory.getLogger(GrpcGetDataStream.class);
   private static final StreamingGetDataRequest HEALTH_CHECK_REQUEST =
       StreamingGetDataRequest.newBuilder().build();
+
+  static final FluentBackoff BACK_OFF_FACTORY =
+      FluentBackoff.DEFAULT
+          .withInitialBackoff(Duration.millis(10))
+          .withMaxBackoff(Duration.standardSeconds(10));
 
   /** @implNote {@link QueuedBatch} objects in the queue are is guarded by {@code this} */
   private final Deque<QueuedBatch> batches;
@@ -185,12 +194,10 @@ final class GrpcGetDataStream
 
     @Override
     public void onDone(Status status) {
-      // if (clientClosed) {
-      //   // We rely on close only occurring after all methods on the stream have returned.
-      //   // Since the requestKeyedData and requestGlobalData methods are blocking this
-      //   // means there should be no pending requests.
-      //   verify(!hasPendingRequests(), "Pending requests not expected if we've half-closed.");
-      // } else {
+      if (status.isOk() && hasPendingRequests()) {
+        LOG.error("Pending requests not expected on successful GetData stream flushing.");
+      }
+      LOG.error("XXX onDone {} cancelling {} streams", status, pending.size());
       for (AppendableInputStream responseStream : pending.values()) {
         responseStream.cancel();
       }
@@ -326,22 +333,27 @@ final class GrpcGetDataStream
     }
   }
 
-  // @Override
-  // protected synchronized void shutdownInternal() {
-  //   // Stream has been explicitly closed. Drain pending input streams and request batches.
-  //   // Future calls to send RPCs will fail.
-  //   pending.values().forEach(AppendableInputStream::cancel);
-  //   pending.clear();
-  //   batches.forEach(
-  //       batch -> {
-  //         batch.markFinalized();
-  //         batch.notifyFailed();
-  //       });
-  //   batches.clear();
-  // }
+  @Override
+  protected synchronized void shutdownInternal() {
+    // Stream has been explicitly closed. Drain pending input streams and request batches.
+    // Future calls to send RPCs will fail.
+    if (currentPhysicalStream != null) {
+      for (AppendableInputStream ais : ((GetDataHandler) currentPhysicalStream).pending.values()) {
+        ais.cancel();
+      }
+      ((GetDataHandler) currentPhysicalStream).pending.clear();
+    }
+    batches.forEach(
+        batch -> {
+          batch.markFinalized();
+          batch.notifyFailed();
+        });
+    batches.clear();
+  }
 
   private <ResponseT> ResponseT issueRequest(QueuedRequest request, ParseFn<ResponseT> parseFn)
       throws WindmillStreamShutdownException {
+    final BackOff backoff = BACK_OFF_FACTORY.backoff();
     while (true) {
       request.resetResponseStream();
       try {
@@ -352,8 +364,14 @@ final class GrpcGetDataStream
         if (!(e instanceof CancellationException)) {
           throw e;
         }
+        LOG.warn("XXXXX Cancellation exception {}", request.id(), e);
       } catch (IOException e) {
         LOG.error("Parsing GetData response failed: ", e);
+        try {
+          BackOffUtils.next(Sleeper.DEFAULT, backoff);
+        } catch (IOException | InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         throwIfShutdown(request, e);
@@ -376,6 +394,7 @@ final class GrpcGetDataStream
     QueuedBatch batch;
     boolean responsibleForSend = false;
     @Nullable QueuedBatch prevBatch = null;
+
     synchronized (this) {
       if (isShutdown) {
         throw shutdownExceptionFor(request);
@@ -424,12 +443,9 @@ final class GrpcGetDataStream
 
   void trySendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
     try {
-      sendBatch(batch);
+      verify(!batch.isEmpty());
       synchronized (this) {
-        if (isShutdown) {
-          throw shutdownExceptionFor(batch);
-        }
-
+        sendBatch(batch);
         verify(
             batch == batches.pollFirst(),
             "Sent GetDataStream request batch removed before send() was complete.");
@@ -438,6 +454,7 @@ final class GrpcGetDataStream
       // of the next batch (if one exists).
       batch.notifySent();
     } catch (Exception e) {
+      LOG.error("Batch failed with {}", e);
       // Free waiters if the send() failed.
       batch.notifyFailed();
       // Propagate the exception to the calling thread.
@@ -445,32 +462,35 @@ final class GrpcGetDataStream
     }
   }
 
-  private void sendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
-    if (batch.isEmpty()) {
-      return;
+  private synchronized void sendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
+    LOG.info("XXXX Sending batch {}", batch);
+    if (isShutdown) {
+      throw shutdownExceptionFor(batch);
+    }
+    if (currentPhysicalStream == null) {
+      throw new RuntimeException("No connected physical stream to send on");
     }
 
     // Synchronization of pending inserts is necessary with send to ensure duplicates are not
     // sent on stream reconnect.
-    synchronized (this) {
-      if (isShutdown) {
-        throw shutdownExceptionFor(batch);
+    for (QueuedRequest request : batch.requestsReadOnly()) {
+      LOG.info("XXX Adding request {}", request.id());
+      // Map#put returns null if there was no previous mapping for the key, meaning we have not
+      // seen it before.
+      // XXX this is causing test failures.
+      boolean notPresent =
+          ((GetDataHandler) currentPhysicalStream)
+                  .pending.put(request.id(), request.getResponseStream())
+              == null;
+      if (!notPresent) {
+        LOG.warn("XXX Request already sent {}\n{}", request.id(), request);
+        verify(notPresent, "Request already sent. {}", request.id());
       }
+    }
 
-      for (QueuedRequest request : batch.requestsReadOnly()) {
-        // Map#put returns null if there was no previous mapping for the key, meaning we have not
-        // seen it before.
-        verify(
-            ((GetDataHandler) currentPhysicalStream)
-                    .pending.put(request.id(), request.getResponseStream())
-                == null,
-            "Request already sent.");
-      }
-
-      if (!trySend(batch.asGetDataRequest())) {
-        // The stream broke before this call went through; onNewStream will retry the fetch.
-        LOG.warn("GetData stream broke before call started.");
-      }
+    if (!trySend(batch.asGetDataRequest())) {
+      // The stream broke before this call went through; onNewStream will retry the fetch.
+      LOG.warn("GetData stream broke before call started.");
     }
   }
 

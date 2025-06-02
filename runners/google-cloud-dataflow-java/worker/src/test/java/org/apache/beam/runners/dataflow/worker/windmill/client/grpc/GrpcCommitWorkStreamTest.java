@@ -144,7 +144,7 @@ public class GrpcCommitWorkStreamTest {
     requestObserverVerifier.verifyNoMoreInteractions();
 
     // We won't get responses so we will have some pending requests.
-    // XXX assertTrue(commitWorkStream.hasPendingRequests());
+    assertTrue(commitProcessed.getCount() > 0);
     commitWorkStream.shutdown();
     commitProcessed.await();
 
