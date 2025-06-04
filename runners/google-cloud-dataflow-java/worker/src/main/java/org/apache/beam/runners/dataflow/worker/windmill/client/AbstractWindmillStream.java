@@ -39,6 +39,7 @@ import org.apache.beam.vendor.grpc.v1p69p0.com.google.api.client.util.Sleeper;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.joda.time.DateTime;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -50,12 +51,12 @@ import org.slf4j.Logger;
  * stream if it is broken. Subclasses are responsible for retrying requests that have been lost on a
  * broken stream.
  *
- * <p>Subclasses should override {@link #onResponse(ResponseT)} to handle responses from the server,
- * and {@link #onNewStream()} to perform any work that must be done when a new stream is created,
- * such as sending headers or retrying requests.
+ * <p>Subclasses should override {@link #newResponseHandler()} to implement a handler for physical
+ * stream connection. {@link #onNewStream()} to perform any work that must be done when a new stream
+ * is created, such as sending headers or retrying requests.
  *
- * <p>{@link #trySend(RequestT)} and {@link #startStream()} should not be called from {@link
- * #onResponse(ResponseT)}; use {@link #executeSafely(Runnable)} instead.
+ * <p>{@link #trySend(RequestT)} and {@link #startStream()} should not be called when handling
+ * responses; use {@link #executeSafely(Runnable)} instead.
  *
  * <p>Synchronization on this is used to synchronize the gRpc stream state and internal data
  * structures. Since grpc channel operations may block, synchronization on this stream may also
@@ -103,11 +104,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   // associated with this handler. The instances are created by subclasses via newResponseHandler.
   // Subclasses may wish to store additional per-physical stream state within the handler.
   @GuardedBy("this")
-  protected @Nullable PhysicalStreamHandler<ResponseT> currentPhysicalStream;
+  protected @Nullable PhysicalStreamHandler currentPhysicalStream;
 
   // Generally the same as currentPhysicalStream, set under synchronization of this but can be read
   // without.
-  private final AtomicReference<PhysicalStreamHandler<ResponseT>> currentPhysicalStreamForDebug =
+  private final AtomicReference<PhysicalStreamHandler> currentPhysicalStreamForDebug =
       new AtomicReference<>();
 
   @GuardedBy("this")
@@ -151,34 +152,32 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         : String.format("%s-WindmillStream-thread", streamType);
   }
 
-  /**
-   * Represents a physical grpc stream that is part of the logical windmill stream.
-   *
-   * @param <ResponseT>
-   */
-  protected interface PhysicalStreamHandler<ResponseT> {
+  /** Represents a physical grpc stream that is part of the logical windmill stream. */
+  protected abstract class PhysicalStreamHandler {
 
     /** Called on each response from the server. */
-    void onResponse(ResponseT response);
+    public abstract void onResponse(ResponseT response);
 
     /** Returns whether there are any pending requests that should be retried on a stream break. */
-    boolean hasPendingRequests();
+    public abstract boolean hasPendingRequests();
 
     /**
      * Called when the physical stream has finished. For streams with requests that should be
      * retried, requests should be moved to parent state so that it is captured by the next
      * flushPendingToStream call.
      */
-    void onDone(Status status);
+    public abstract void onDone(Status status);
 
     /**
      * @implNote Don't require synchronization on AbstractWindmillStream.this, see the {@link
      *     #appendSummaryHtml(PrintWriter)} comment.
      */
-    void appendHtml(PrintWriter writer);
+    public abstract void appendHtml(PrintWriter writer);
+
+    private final StreamDebugMetrics streamDebugMetrics = StreamDebugMetrics.create();
   }
 
-  protected abstract PhysicalStreamHandler<ResponseT> newResponseHandler();
+  protected abstract PhysicalStreamHandler newResponseHandler();
 
   protected abstract void onNewStream() throws WindmillStreamShutdownException;
 
@@ -186,6 +185,10 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   @CanIgnoreReturnValue
   protected final synchronized boolean trySend(RequestT request)
       throws WindmillStreamShutdownException {
+    if (currentPhysicalStream == null) {
+      return false;
+    }
+    currentPhysicalStream.streamDebugMetrics.recordSend();
     debugMetrics.recordSend();
     try {
       requestObserver.onNext(request);
@@ -217,10 +220,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     // Add the stream to the registry after it has been fully constructed.
     streamRegistry.add(this);
     while (true) {
-      PhysicalStreamHandler<ResponseT> streamHandler = newResponseHandler();
+      @NonNull PhysicalStreamHandler streamHandler = newResponseHandler();
       try {
         synchronized (this) {
           debugMetrics.recordStart();
+          streamHandler.streamDebugMetrics.recordStart();
           currentPhysicalStream = streamHandler;
           currentPhysicalStreamForDebug.set(currentPhysicalStream);
           requestObserver.reset(physicalStreamFactory.apply(new ResponseObserver(streamHandler)));
@@ -313,9 +317,20 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   public final void appendSummaryHtml(PrintWriter writer) {
     appendSpecificHtml(writer);
 
-    @Nullable PhysicalStreamHandler<ResponseT> currentHandler = currentPhysicalStreamForDebug.get();
+    @Nullable PhysicalStreamHandler currentHandler = currentPhysicalStreamForDebug.get();
     if (currentHandler != null) {
+      writer.format("Physical stream: ");
       currentHandler.appendHtml(writer);
+      StreamDebugMetrics.Snapshot summaryMetrics =
+          currentHandler.streamDebugMetrics.getSummaryMetrics();
+      if (summaryMetrics.isClientClosed()) {
+        writer.write(" client closed");
+      }
+      writer.format(
+          " current stream is %dms old, last send %dms, last response %dms\n",
+          summaryMetrics.streamAge(),
+          summaryMetrics.timeSinceLastSend(),
+          summaryMetrics.timeSinceLastResponse());
     }
 
     StreamDebugMetrics.Snapshot summaryMetrics = debugMetrics.getSummaryMetrics();
@@ -363,6 +378,9 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     debugMetrics.recordHalfClose();
     clientClosed = true;
     try {
+      if (currentPhysicalStream != null) {
+        currentPhysicalStream.streamDebugMetrics.recordHalfClose();
+      }
       requestObserver.onCompleted();
     } catch (ResettableThrowingStreamObserver.StreamClosedException e) {
       logger.warn("Stream was previously closed.");
@@ -405,7 +423,11 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   protected synchronized void shutdownInternal() {}
 
   /** Returns true if the stream was torn down and should not be restarted internally. */
-  private synchronized boolean maybeTearDownStream(PhysicalStreamHandler<ResponseT> doneStream) {
+  private synchronized boolean maybeTearDownStream(PhysicalStreamHandler doneStream) {
+    // XXX maybe hasPendingRequests should still be at the overall stream instead of physical stream
+    // or needs to be on both.
+    // Then we could see if 1. all current streams are closed 2. there are not requests to send on
+    // new stream.
     if (isShutdown || (clientClosed && !doneStream.hasPendingRequests())) {
       // Once we have background closing physicalStreams we will need to improve this to wait for
       // all of the work of the logical stream to be complete.
@@ -419,9 +441,9 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
   }
 
   private class ResponseObserver implements StreamObserver<ResponseT> {
-    private final PhysicalStreamHandler<ResponseT> handler;
+    private final PhysicalStreamHandler handler;
 
-    ResponseObserver(PhysicalStreamHandler<ResponseT> handler) {
+    ResponseObserver(PhysicalStreamHandler handler) {
       this.handler = handler;
     }
 
@@ -433,6 +455,7 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         // Ignore.
       }
       debugMetrics.recordResponse();
+      handler.streamDebugMetrics.recordResponse();
       handler.onResponse(response);
     }
 
@@ -447,11 +470,7 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
     }
   }
 
-  private void onPhysicalStreamCompletion(Status status, PhysicalStreamHandler<ResponseT> handler) {
-    // XXX the problem with this is that we complete requests in getdata stream and they
-    // then are retried on the same physicalstreamhandler.
-    // IDEA: what if we change send to block for the new physical stream to be ready?
-    // since send blocks anyway we could just block there waiting for the backoff to occur.
+  private void onPhysicalStreamCompletion(Status status, PhysicalStreamHandler handler) {
     synchronized (this) {
       if (currentPhysicalStream == handler) {
         currentPhysicalStreamForDebug.set(null);

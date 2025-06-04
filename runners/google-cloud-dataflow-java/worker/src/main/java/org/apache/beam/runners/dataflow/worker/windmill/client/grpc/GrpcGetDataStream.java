@@ -171,12 +171,11 @@ final class GrpcGetDataStream
     trySend(getDataRequest);
   }
 
-  class GetDataHandler implements PhysicalStreamHandler<StreamingGetDataResponse> {
-
+  class GetDataHandler extends PhysicalStreamHandler {
     private final ConcurrentHashMap<Long, AppendableInputStream> pending =
         new ConcurrentHashMap<>();
 
-    void sendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
+    public void sendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
       // Synchronization of pending inserts is necessary with send to ensure duplicates are not
       // sent on stream reconnect.
       for (QueuedRequest request : batch.requestsReadOnly()) {
@@ -258,7 +257,7 @@ final class GrpcGetDataStream
   }
 
   @Override
-  protected PhysicalStreamHandler<StreamingGetDataResponse> newResponseHandler() {
+  protected PhysicalStreamHandler newResponseHandler() {
     return new GetDataHandler();
   }
 

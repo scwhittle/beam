@@ -159,7 +159,7 @@ final class GrpcCommitWorkStream
     }
   }
 
-  private class CommitStreamHandler implements PhysicalStreamHandler<StreamingCommitResponse> {
+  private class CommitStreamHandler extends PhysicalStreamHandler {
     @Override
     public void onResponse(StreamingCommitResponse response) {
       CommitCompletionFailureHandler failureHandler = new CommitCompletionFailureHandler();
@@ -217,7 +217,7 @@ final class GrpcCommitWorkStream
   }
 
   @Override
-  protected PhysicalStreamHandler<StreamingCommitResponse> newResponseHandler() {
+  protected PhysicalStreamHandler newResponseHandler() {
     return new CommitStreamHandler();
   }
 

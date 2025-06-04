@@ -118,28 +118,26 @@ public final class GrpcGetWorkerMetadataStream
     return Optional.empty();
   }
 
-  private class Handler implements PhysicalStreamHandler<WorkerMetadataResponse> {
-
-    @Override
-    public void onResponse(WorkerMetadataResponse response) {
-      extractWindmillEndpointsFrom(response).ifPresent(serverMappingConsumer);
-    }
-
-    @Override
-    public boolean hasPendingRequests() {
-      return false;
-    }
-
-    @Override
-    public void onDone(Status status) {}
-
-    @Override
-    public void appendHtml(PrintWriter writer) {}
-  }
-
   @Override
-  protected PhysicalStreamHandler<WorkerMetadataResponse> newResponseHandler() {
-    return new Handler();
+  protected PhysicalStreamHandler newResponseHandler() {
+    return new PhysicalStreamHandler() {
+
+      @Override
+      public void onResponse(WorkerMetadataResponse response) {
+        extractWindmillEndpointsFrom(response).ifPresent(serverMappingConsumer);
+      }
+
+      @Override
+      public boolean hasPendingRequests() {
+        return false;
+      }
+
+      @Override
+      public void onDone(Status status) {}
+
+      @Override
+      public void appendHtml(PrintWriter writer) {}
+    };
   }
 
   @Override

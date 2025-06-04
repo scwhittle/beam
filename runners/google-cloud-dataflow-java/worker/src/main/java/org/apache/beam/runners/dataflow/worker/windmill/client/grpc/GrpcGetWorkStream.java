@@ -129,8 +129,7 @@ final class GrpcGetWorkStream
         });
   }
 
-  private class GetWorkStreamHandler
-      implements PhysicalStreamHandler<StreamingGetWorkResponseChunk> {
+  private class GetWorkStreamHandler extends PhysicalStreamHandler {
 
     private final ConcurrentHashMap<Long, GetWorkResponseChunkAssembler> workItemAssemblers =
         new ConcurrentHashMap<>();
@@ -159,7 +158,7 @@ final class GrpcGetWorkStream
   }
 
   @Override
-  protected PhysicalStreamHandler<StreamingGetWorkResponseChunk> newResponseHandler() {
+  protected PhysicalStreamHandler newResponseHandler() {
     return new GetWorkStreamHandler();
   }
 

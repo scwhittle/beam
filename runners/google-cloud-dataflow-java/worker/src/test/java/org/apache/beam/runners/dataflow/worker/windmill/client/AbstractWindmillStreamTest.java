@@ -157,26 +157,24 @@ public class AbstractWindmillStreamTest {
           "Test");
     }
 
-    private static class TestHandler implements PhysicalStreamHandler<Integer> {
-
-      @Override
-      public void onResponse(Integer response) {}
-
-      @Override
-      public boolean hasPendingRequests() {
-        return false;
-      }
-
-      @Override
-      public void onDone(Status status) {}
-
-      @Override
-      public void appendHtml(PrintWriter writer) {}
-    }
-
     @Override
-    protected PhysicalStreamHandler<Integer> newResponseHandler() {
-      return new TestHandler();
+    protected PhysicalStreamHandler newResponseHandler() {
+      return new PhysicalStreamHandler() {
+
+        @Override
+        public void onResponse(Integer response) {}
+
+        @Override
+        public boolean hasPendingRequests() {
+          return false;
+        }
+
+        @Override
+        public void onDone(Status status) {}
+
+        @Override
+        public void appendHtml(PrintWriter writer) {}
+      };
     }
 
     @Override

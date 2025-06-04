@@ -188,8 +188,7 @@ final class GrpcDirectGetWorkStream
     }
   }
 
-  private class GetWorkPhysicalStreamHandler
-      implements PhysicalStreamHandler<StreamingGetWorkResponseChunk> {
+  private class GetWorkPhysicalStreamHandler extends PhysicalStreamHandler {
     /**
      * Map of stream IDs to their buffers. Used to aggregate streaming gRPC response chunks as they
      * come in. Once all chunks for a response has been received, the chunk is processed and the
@@ -224,7 +223,7 @@ final class GrpcDirectGetWorkStream
   }
 
   @Override
-  protected PhysicalStreamHandler<StreamingGetWorkResponseChunk> newResponseHandler() {
+  protected PhysicalStreamHandler newResponseHandler() {
     return new GetWorkPhysicalStreamHandler();
   }
 
