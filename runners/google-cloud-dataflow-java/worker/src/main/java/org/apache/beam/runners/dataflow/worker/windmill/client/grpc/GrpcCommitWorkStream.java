@@ -116,6 +116,11 @@ final class GrpcCommitWorkStream
   }
 
   @Override
+  public void appendSpecificHtml(PrintWriter writer) {
+    writer.format("CommitWorkStream: %d pending", pending.size());
+  }
+
+  @Override
   protected synchronized void onNewStream() throws WindmillStreamShutdownException {
     trySend(StreamingCommitWorkRequest.newBuilder().setHeader(jobHeader).build());
     // Flush all pending requests that are no longer on active streams.

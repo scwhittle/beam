@@ -219,10 +219,7 @@ final class GrpcDirectGetWorkStream
     @Override
     public void appendHtml(PrintWriter writer) {
       // Number of buffers is same as distinct workers that sent work on this stream.
-      writer.format(
-          "GetWorkStream: %d buffers, " + "last sent request: %s; ",
-          workItemAssemblers.size(), lastRequest.get());
-      writer.print(budgetTracker.debugString());
+      writer.format("%d buffers", workItemAssemblers.size());
     }
   }
 
@@ -248,6 +245,12 @@ final class GrpcDirectGetWorkStream
     lastRequest.set(request);
     budgetTracker.recordBudgetRequested(initialGetWorkBudget);
     trySend(request);
+  }
+
+  @Override
+  public void appendSpecificHtml(PrintWriter writer) {
+    writer.format("GetWorkStream: last sent request: %s; ", lastRequest.get());
+    writer.print(budgetTracker.debugString());
   }
 
   @Override

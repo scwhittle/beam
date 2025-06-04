@@ -134,13 +134,7 @@ public final class GrpcGetWorkerMetadataStream
     public void onDone(Status status) {}
 
     @Override
-    public void appendHtml(PrintWriter writer) {
-      synchronized (metadataLock) {
-        writer.format(
-            "GetWorkerMetadataStream:  job_header=[%s], current_metadata=[%s]",
-            workerMetadataRequest.getHeader(), latestResponse);
-      }
-    }
+    public void appendHtml(PrintWriter writer) {}
   }
 
   @Override
@@ -156,5 +150,14 @@ public final class GrpcGetWorkerMetadataStream
   @Override
   protected void sendHealthCheck() throws WindmillStreamShutdownException {
     trySend(HEALTH_CHECK_REQUEST);
+  }
+
+  @Override
+  protected void appendSpecificHtml(PrintWriter writer) {
+    synchronized (metadataLock) {
+      writer.format(
+          "GetWorkerMetadataStream:  job_header=[%s], current_metadata=[%s]",
+          workerMetadataRequest.getHeader(), latestResponse);
+    }
   }
 }

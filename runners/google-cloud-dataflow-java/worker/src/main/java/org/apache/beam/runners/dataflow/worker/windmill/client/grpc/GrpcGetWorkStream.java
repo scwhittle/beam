@@ -154,9 +154,7 @@ final class GrpcGetWorkStream
     @Override
     public void appendHtml(PrintWriter writer) {
       // Number of buffers is same as distinct workers that sent work on this stream.
-      writer.format(
-          "GetWorkStream: %d buffers, %d inflight messages allowed, %d inflight bytes allowed",
-          workItemAssemblers.size(), inflightMessages.intValue(), inflightBytes.intValue());
+      writer.format("%d buffers", workItemAssemblers.size());
     }
   }
 
@@ -174,6 +172,13 @@ final class GrpcGetWorkStream
             .setSupportsMultipleWorkItemsInChunk(requestBatchedGetWorkResponse)
             .setRequest(request)
             .build());
+  }
+
+  @Override
+  public void appendSpecificHtml(PrintWriter writer) {
+    writer.format(
+        "GetWorkStream: %d inflight messages allowed, %d inflight bytes allowed",
+        inflightMessages.intValue(), inflightBytes.intValue());
   }
 
   @Override

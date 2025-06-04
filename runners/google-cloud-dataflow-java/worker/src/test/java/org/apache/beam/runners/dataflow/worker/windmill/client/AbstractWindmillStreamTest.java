@@ -204,6 +204,9 @@ public class AbstractWindmillStreamTest {
         Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
       }
     }
+
+    @Override
+    protected void appendSpecificHtml(PrintWriter writer) {}
   }
 
   private static class TestCallStreamObserver extends CallStreamObserver<Integer> {

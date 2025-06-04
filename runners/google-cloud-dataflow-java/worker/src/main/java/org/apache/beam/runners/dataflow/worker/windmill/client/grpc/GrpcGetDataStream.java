@@ -35,7 +35,9 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
+import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.ComputationGetDataRequest;
@@ -80,7 +82,10 @@ final class GrpcGetDataStream
           .withMaxBackoff(Duration.standardSeconds(10));
 
   /** @implNote {@link QueuedBatch} objects in the queue are is guarded by {@code this} */
+  @GuardedBy("this")
   private final Deque<QueuedBatch> batches;
+
+  private final Supplier<Integer> batchesDebugSizeSupplier;
 
   private final AtomicLong idGenerator;
   private final JobHeader jobHeader;
@@ -115,7 +120,11 @@ final class GrpcGetDataStream
     this.idGenerator = idGenerator;
     this.jobHeader = jobHeader;
     this.streamingRpcBatchLimit = streamingRpcBatchLimit;
-    this.batches = new ConcurrentLinkedDeque<>();
+    // A concurrent deque is used so that we can observe the size without synchronization on "this".
+    // Otherwise the deque is accessed via batches which has a guardedby annotation.
+    ConcurrentLinkedDeque<QueuedBatch> batches = new ConcurrentLinkedDeque<>();
+    this.batches = batches;
+    this.batchesDebugSizeSupplier = batches::size;
     this.sendKeyedGetDataRequests = sendKeyedGetDataRequests;
     this.processHeartbeatResponses = processHeartbeatResponses;
   }
@@ -167,6 +176,27 @@ final class GrpcGetDataStream
     private final ConcurrentHashMap<Long, AppendableInputStream> pending =
         new ConcurrentHashMap<>();
 
+    void sendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
+      // Synchronization of pending inserts is necessary with send to ensure duplicates are not
+      // sent on stream reconnect.
+      for (QueuedRequest request : batch.requestsReadOnly()) {
+        LOG.info("XXX Adding request {}", request.id());
+        // Map#put returns null if there was no previous mapping for the key, meaning we have not
+        // seen it before.
+        // XXX this is causing test failures.
+        boolean notPresent = pending.put(request.id(), request.getResponseStream()) == null;
+        if (!notPresent) {
+          LOG.warn("XXX Request already sent {}\n{}", request.id(), request);
+          verify(notPresent, "Request already sent. {}", request.id());
+        }
+      }
+
+      if (!trySend(batch.asGetDataRequest())) {
+        // The stream broke before this call went through; onNewStream will retry the fetch.
+        LOG.warn("GetData stream broke before call started.");
+      }
+    }
+
     @Override
     public void onResponse(StreamingGetDataResponse chunk) {
       checkArgument(chunk.getRequestIdCount() == chunk.getSerializedResponseCount());
@@ -205,9 +235,7 @@ final class GrpcGetDataStream
 
     @Override
     public void appendHtml(PrintWriter writer) {
-      writer.format(
-          "GetDataStream: %d queued batches, %d pending requests [",
-          batches.size(), pending.size());
+      writer.format("%d pending requests [", pending.size());
       for (Map.Entry<Long, AppendableInputStream> entry : pending.entrySet()) {
         writer.format("Stream %d ", entry.getKey());
         if (entry.getValue().isCancelled()) {
@@ -237,6 +265,27 @@ final class GrpcGetDataStream
   @Override
   protected synchronized void onNewStream() throws WindmillStreamShutdownException {
     trySend(StreamingGetDataRequest.newBuilder().setHeader(jobHeader).build());
+    while (!batches.isEmpty()) {
+      QueuedBatch batch = batches.peekFirst();
+      verify(!batch.isEmpty());
+      if (batch.isFinalized()) {
+        try {
+          ((GetDataHandler) currentPhysicalStream).sendBatch(batch);
+          verify(
+              batch == batches.pollFirst(),
+              "Sent GetDataStream request batch removed before send() was complete.");
+          // Notify all waiters with requests in this batch as well as the sender
+          // of the next batch (if one exists).
+          batch.notifySent();
+        } catch (Exception e) {
+          LOG.error("Batch failed with {}", e);
+          // Free waiters if the send() failed.
+          batch.notifyFailed();
+          // Propagate the exception to the calling thread.
+          throw e;
+        }
+      }
+    }
   }
 
   private long uniqueId() {
@@ -351,6 +400,11 @@ final class GrpcGetDataStream
     batches.clear();
   }
 
+  @Override
+  public void appendSpecificHtml(PrintWriter writer) {
+    writer.format("GetDataStream: %d queued batches", batchesDebugSizeSupplier.get());
+  }
+
   private <ResponseT> ResponseT issueRequest(QueuedRequest request, ParseFn<ResponseT> parseFn)
       throws WindmillStreamShutdownException {
     final BackOff backoff = BACK_OFF_FACTORY.backoff();
@@ -422,34 +476,35 @@ final class GrpcGetDataStream
       } else {
         prevBatch.waitForSendOrFailNotification();
       }
-      // Finalize the batch so that no additional requests will be added.  Leave the batch in the
-      // queue so that a subsequent batch will wait for its completion.
-      synchronized (this) {
-        if (isShutdown) {
-          batch.markFinalized();
-          batch.notifyFailed();
-          throw shutdownExceptionFor(batch);
-        }
-
-        verify(batch == batches.peekFirst(), "GetDataStream request batch removed before send().");
-        batch.markFinalized();
-        trySendBatch(batch);
-      }
+      trySendBatch(batch);
     } else {
       // Wait for this batch to be sent before parsing the response.
       batch.waitForSendOrFailNotification();
     }
   }
 
-  void trySendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
+  private synchronized void trySendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
+    // Finalize the batch so that no additional requests will be added.  Leave the batch in the
+    // queue so that a subsequent batch will wait for its completion.
+    batch.markFinalized();
+
+    if (isShutdown) {
+      batch.notifyFailed();
+      throw shutdownExceptionFor(batch);
+    }
+    if (currentPhysicalStream == null) {
+      // Leave the batch finalized but in the batches queue.  Finalized batches will be sent on the
+      // new stream in onNewStream.
+      return;
+    }
+
     try {
+      verify(batch == batches.peekFirst(), "GetDataStream request batch removed before send().");
       verify(!batch.isEmpty());
-      synchronized (this) {
-        sendBatch(batch);
-        verify(
-            batch == batches.pollFirst(),
-            "Sent GetDataStream request batch removed before send() was complete.");
-      }
+      ((GetDataHandler) currentPhysicalStream).sendBatch(batch);
+      verify(
+          batch == batches.pollFirst(),
+          "Sent GetDataStream request batch removed before send() was complete.");
       // Notify all waiters with requests in this batch as well as the sender
       // of the next batch (if one exists).
       batch.notifySent();
@@ -459,38 +514,6 @@ final class GrpcGetDataStream
       batch.notifyFailed();
       // Propagate the exception to the calling thread.
       throw e;
-    }
-  }
-
-  private synchronized void sendBatch(QueuedBatch batch) throws WindmillStreamShutdownException {
-    LOG.info("XXXX Sending batch {}", batch);
-    if (isShutdown) {
-      throw shutdownExceptionFor(batch);
-    }
-    if (currentPhysicalStream == null) {
-      throw new RuntimeException("No connected physical stream to send on");
-    }
-
-    // Synchronization of pending inserts is necessary with send to ensure duplicates are not
-    // sent on stream reconnect.
-    for (QueuedRequest request : batch.requestsReadOnly()) {
-      LOG.info("XXX Adding request {}", request.id());
-      // Map#put returns null if there was no previous mapping for the key, meaning we have not
-      // seen it before.
-      // XXX this is causing test failures.
-      boolean notPresent =
-          ((GetDataHandler) currentPhysicalStream)
-                  .pending.put(request.id(), request.getResponseStream())
-              == null;
-      if (!notPresent) {
-        LOG.warn("XXX Request already sent {}\n{}", request.id(), request);
-        verify(notPresent, "Request already sent. {}", request.id());
-      }
-    }
-
-    if (!trySend(batch.asGetDataRequest())) {
-      // The stream broke before this call went through; onNewStream will retry the fetch.
-      LOG.warn("GetData stream broke before call started.");
     }
   }
 

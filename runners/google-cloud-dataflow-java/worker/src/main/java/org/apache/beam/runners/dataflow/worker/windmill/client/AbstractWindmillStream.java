@@ -311,6 +311,8 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
    *     status page rendering.
    */
   public final void appendSummaryHtml(PrintWriter writer) {
+    appendSpecificHtml(writer);
+
     @Nullable PhysicalStreamHandler<ResponseT> currentHandler = currentPhysicalStreamForDebug.get();
     if (currentHandler != null) {
       currentHandler.appendHtml(writer);
@@ -346,6 +348,14 @@ public abstract class AbstractWindmillStream<RequestT, ResponseT> implements Win
         requestObserver.isClosed(),
         summaryMetrics.shutdownTime().map(DateTime::toString).orElse(NOT_SHUTDOWN));
   }
+
+  /**
+   * Add specific debug state for the logical stream.
+   *
+   * @implNote Don't require synchronization on stream, see the {@link
+   *     #appendSummaryHtml(PrintWriter)} comment.
+   */
+  protected abstract void appendSpecificHtml(PrintWriter writer);
 
   @Override
   public final synchronized void halfClose() {
