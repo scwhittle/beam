@@ -26,11 +26,8 @@ import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.beam.runners.dataflow.worker.windmill.CloudWindmillServiceV1Alpha1Grpc;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
@@ -41,12 +38,13 @@ import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.ManagedChannel;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Server;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.inprocess.InProcessChannelBuilder;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.inprocess.InProcessServerBuilder;
-import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.testing.GrpcCleanupRule;
+import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ErrorCollector;
 import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -63,9 +61,10 @@ public class GrpcCommitWorkStreamTest {
           .build();
   private static final String COMPUTATION_ID = "computationId";
 
+  @Rule public final ErrorCollector errorCollector = new ErrorCollector();
   @Rule public final GrpcCleanupRule grpcCleanup = new GrpcCleanupRule();
   @Rule public transient Timeout globalTimeout = Timeout.seconds(60);
-  private final CommitWorkStreamTestImpl service = new CommitWorkStreamTestImpl();
+  private final FakeWindmillGrpcService fakeService = new FakeWindmillGrpcService(errorCollector);
   private ManagedChannel inProcessChannel;
   private Server inProcessServer;
 
@@ -83,7 +82,7 @@ public class GrpcCommitWorkStreamTest {
     inProcessServer =
         grpcCleanup.register(
             InProcessServerBuilder.forName(FAKE_SERVER_NAME)
-                .addService(service)
+                .addService(fakeService)
                 .directExecutor()
                 .build()
                 .start());
@@ -128,7 +127,7 @@ public class GrpcCommitWorkStreamTest {
     } catch (StreamObserverCancelledException ignored) {
     }
 
-    CommitWorkStreamTestImpl.StreamInfo streamInfo = service.waitForConnectionAndConsumeHeader();
+    FakeWindmillGrpcService.CommitStreamInfo streamInfo = waitForConnectionAndConsumeHeader();
     // The next request should have some chunks.
     assertFalse(streamInfo.requests.take().getCommitChunkList().isEmpty());
 
@@ -149,7 +148,7 @@ public class GrpcCommitWorkStreamTest {
     CountDownLatch commitProcessed = new CountDownLatch(numCommits);
 
     GrpcCommitWorkStream commitWorkStream = createCommitWorkStream();
-    CommitWorkStreamTestImpl.StreamInfo streamInfo = service.waitForConnectionAndConsumeHeader();
+    FakeWindmillGrpcService.CommitStreamInfo streamInfo = waitForConnectionAndConsumeHeader();
     commitWorkStream.shutdown();
     assertNotNull(streamInfo.onDone.get());
 
@@ -176,7 +175,7 @@ public class GrpcCommitWorkStreamTest {
   public void testCommitWorkItem_retryOnNewStream() throws Exception {
     int numCommits = 5;
     GrpcCommitWorkStream commitWorkStream = createCommitWorkStream();
-    CommitWorkStreamTestImpl.StreamInfo streamInfo = service.waitForConnectionAndConsumeHeader();
+    FakeWindmillGrpcService.CommitStreamInfo streamInfo = waitForConnectionAndConsumeHeader();
 
     final AtomicBoolean allOk = new AtomicBoolean(true);
     final CountDownLatch firstResponsesDone = new CountDownLatch(2);
@@ -218,8 +217,8 @@ public class GrpcCommitWorkStreamTest {
     streamInfo.responseObserver.onError(new IOException("test error"));
 
     // The stream should reconnect and retry the requests.
-    CommitWorkStreamTestImpl.StreamInfo reconnectStreamInfo =
-        service.waitForConnectionAndConsumeHeader();
+    FakeWindmillGrpcService.CommitStreamInfo reconnectStreamInfo =
+        waitForConnectionAndConsumeHeader();
     Windmill.StreamingCommitWorkRequest reconnectRequest = reconnectStreamInfo.requests.take();
     assertEquals(3, reconnectRequest.getCommitChunkCount());
     for (int i = 0; i < 3; ++i) {
@@ -246,7 +245,7 @@ public class GrpcCommitWorkStreamTest {
     int numCommits = 2;
     CountDownLatch commitProcessed = new CountDownLatch(numCommits);
     GrpcCommitWorkStream commitWorkStream = createCommitWorkStream();
-    CommitWorkStreamTestImpl.StreamInfo streamInfo = service.waitForConnectionAndConsumeHeader();
+    FakeWindmillGrpcService.CommitStreamInfo streamInfo = waitForConnectionAndConsumeHeader();
 
     try (WindmillStream.CommitWorkStream.RequestBatcher batcher = commitWorkStream.batcher()) {
       for (int i = 0; i < numCommits; i++) {
@@ -264,54 +263,15 @@ public class GrpcCommitWorkStreamTest {
     assertEquals(0, streamInfo.requests.size());
   }
 
-  private static class CommitWorkStreamTestImpl
-      extends CloudWindmillServiceV1Alpha1Grpc.CloudWindmillServiceV1Alpha1ImplBase {
-    public static class StreamInfo {
-      public StreamInfo(StreamObserver<Windmill.StreamingCommitResponse> responseObserver) {
-        this.responseObserver = responseObserver;
-      }
-
-      public final StreamObserver<Windmill.StreamingCommitResponse> responseObserver;
-      public final BlockingQueue<Windmill.StreamingCommitWorkRequest> requests =
-          new LinkedBlockingQueue<>(1000);
-      public final CompletableFuture<Throwable> onDone = new CompletableFuture<>();
-    };
-
-    private final BlockingQueue<StreamInfo> streams = new LinkedBlockingQueue<>(1000);
-
-    public StreamInfo waitForConnectionAndConsumeHeader() {
-      try {
-        StreamInfo info = streams.take();
-        Windmill.StreamingCommitWorkRequest request = info.requests.take();
-        assertEquals(TEST_JOB_HEADER, request.getHeader());
-        assertEquals(0, request.getCommitChunkCount());
-        return info;
-      } catch (InterruptedException e) {
-        throw new RuntimeException(e);
-      }
-    }
-
-    @Override
-    public StreamObserver<Windmill.StreamingCommitWorkRequest> commitWorkStream(
-        StreamObserver<Windmill.StreamingCommitResponse> responseObserver) {
-      StreamInfo info = new StreamInfo(responseObserver);
-      assertTrue(streams.offer(info));
-      return new StreamObserver<Windmill.StreamingCommitWorkRequest>() {
-        @Override
-        public void onNext(Windmill.StreamingCommitWorkRequest streamingCommitWorkRequest) {
-          assertTrue(info.requests.add(streamingCommitWorkRequest));
-        }
-
-        @Override
-        public void onError(Throwable throwable) {
-          info.onDone.complete(throwable);
-        }
-
-        @Override
-        public void onCompleted() {
-          info.onDone.complete(null);
-        }
-      };
+  private FakeWindmillGrpcService.CommitStreamInfo waitForConnectionAndConsumeHeader() {
+    try {
+      FakeWindmillGrpcService.CommitStreamInfo info = fakeService.waitForConnectedCommitStream();
+      Windmill.StreamingCommitWorkRequest request = info.requests.take();
+      errorCollector.checkThat(request.getHeader(), Matchers.is(TEST_JOB_HEADER));
+      assertEquals(0, request.getCommitChunkCount());
+      return info;
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
     }
   }
 }
