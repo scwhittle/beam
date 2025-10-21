@@ -519,4 +519,45 @@ public class MapTaskExecutorTest {
     Mockito.verify(o2, atLeastOnce()).abortReadLoop();
     Mockito.verify(stateTracker).deactivate();
   }
+
+  @Test
+  public void testCloseAbortsOperations() throws Exception {
+    Operation o1 = Mockito.mock(Operation.class);
+    Operation o2 = Mockito.mock(Operation.class);
+    List<Operation> operations = Arrays.asList(o1, o2);
+    ExecutionStateTracker stateTracker = Mockito.spy(ExecutionStateTracker.newForTest());
+
+    try (MapTaskExecutor executor = new MapTaskExecutor(operations, counterSet, stateTracker)) {}
+
+    Mockito.verify(o1).abort();
+    Mockito.verify(o2).abort();
+    Mockito.verify(stateTracker).deactivate();
+  }
+
+  @Test
+  public void testExceptionAndThenCloseAbortsJustOnce() throws Exception {
+    Operation o1 = Mockito.mock(Operation.class);
+    Operation o2 = Mockito.mock(Operation.class);
+    Mockito.doThrow(new Exception("in start")).when(o2).start();
+
+    ExecutionStateTracker stateTracker = Mockito.spy(ExecutionStateTracker.newForTest());
+    MapTaskExecutor executor = new MapTaskExecutor(Arrays.asList(o1, o2), counterSet, stateTracker);
+    try {
+      executor.execute();
+      fail("Should have thrown");
+    } catch (Exception e) {
+
+    }
+    InOrder inOrder = Mockito.inOrder(o1, o2, stateTracker);
+    inOrder.verify(stateTracker).activate();
+    inOrder.verify(o2).start();
+
+    // Order of abort doesn't matter
+    Mockito.verify(o1).abort();
+    Mockito.verify(o2).abort();
+    Mockito.verify(stateTracker).deactivate();
+    Mockito.verifyNoMoreInteractions(o1, o2);
+    // Closing after already closed should not call abort again.
+    executor.close();
+  }
 }
