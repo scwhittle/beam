@@ -53,6 +53,7 @@ class WindowingWindmillReader<K, T> extends NativeReader<WindowedValue<KeyedWork
   private final Coder<? extends BoundedWindow> windowCoder;
   private final Coder<Collection<? extends BoundedWindow>> windowsCoder;
   private StreamingModeExecutionContext context;
+  private final boolean skipExceptions;
 
   WindowingWindmillReader(
       Coder<WindowedValue<KeyedWorkItem<K, T>>> coder, StreamingModeExecutionContext context) {
@@ -66,6 +67,7 @@ class WindowingWindmillReader<K, T> extends NativeReader<WindowedValue<KeyedWork
     this.keyCoder = keyedWorkItemCoder.getKeyCoder();
     this.valueCoder = keyedWorkItemCoder.getElementCoder();
     this.context = context;
+    this.skipExceptions = true;
   }
 
   /** A {@link ReaderFactory.Registrar} for grouping windmill sources. */
@@ -119,7 +121,8 @@ class WindowingWindmillReader<K, T> extends NativeReader<WindowedValue<KeyedWork
     final K key = keyCoder.decode(context.getSerializedKey().newInput(), Coder.Context.OUTER);
     final WorkItem workItem = context.getWorkItem();
     KeyedWorkItem<K, T> keyedWorkItem =
-        new WindmillKeyedWorkItem<>(key, workItem, windowCoder, windowsCoder, valueCoder);
+        new WindmillKeyedWorkItem<>(
+            key, workItem, windowCoder, windowsCoder, valueCoder, skipExceptions);
     final boolean isEmptyWorkItem =
         (Iterables.isEmpty(keyedWorkItem.timersIterable())
             && Iterables.isEmpty(keyedWorkItem.elementsIterable()));

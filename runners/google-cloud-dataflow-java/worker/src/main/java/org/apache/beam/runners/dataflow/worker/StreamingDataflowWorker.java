@@ -327,6 +327,8 @@ public final class StreamingDataflowWorker {
     LOG.debug("WindmillServiceEndpoint: {}", options.getWindmillServiceEndpoint());
     LOG.debug("WindmillServicePort: {}", options.getWindmillServicePort());
     LOG.debug("LocalWindmillHostport: {}", options.getLocalWindmillHostport());
+
+    LOG.info("Using patched jar which will skip IOExceptions during decoding of input elements.");
   }
 
   private StreamingWorkerHarnessFactoryOutput createApplianceWorkerHarness(

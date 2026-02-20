@@ -43,6 +43,8 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Fluent
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An implementation of {@link KeyedWorkItem} that wraps around a {@code Windmill.WorkItem}.
@@ -58,12 +60,15 @@ public class WindmillKeyedWorkItem<K, ElemT> implements KeyedWorkItem<K, ElemT> 
   private static final Predicate<Timer> IS_WATERMARK =
       input -> input.getType() == Timer.Type.WATERMARK;
 
+  private static final Logger LOG = LoggerFactory.getLogger(WindmillKeyedWorkItem.class);
+
   private final Windmill.WorkItem workItem;
   private final K key;
 
   private final transient Coder<? extends BoundedWindow> windowCoder;
   private final transient Coder<Collection<? extends BoundedWindow>> windowsCoder;
   private final transient Coder<ElemT> valueCoder;
+  private final boolean skipExceptions;
 
   public WindmillKeyedWorkItem(
       K key,
@@ -71,11 +76,22 @@ public class WindmillKeyedWorkItem<K, ElemT> implements KeyedWorkItem<K, ElemT> 
       Coder<? extends BoundedWindow> windowCoder,
       Coder<Collection<? extends BoundedWindow>> windowsCoder,
       Coder<ElemT> valueCoder) {
+    this(key, workItem, windowCoder, windowsCoder, valueCoder, false);
+  }
+
+  public WindmillKeyedWorkItem(
+      K key,
+      Windmill.WorkItem workItem,
+      Coder<? extends BoundedWindow> windowCoder,
+      Coder<Collection<? extends BoundedWindow>> windowsCoder,
+      Coder<ElemT> valueCoder,
+      boolean skipExceptions) {
     this.key = key;
     this.workItem = workItem;
     this.windowCoder = windowCoder;
     this.windowsCoder = windowsCoder;
     this.valueCoder = valueCoder;
+    this.skipExceptions = skipExceptions;
   }
 
   @Override
@@ -116,9 +132,14 @@ public class WindmillKeyedWorkItem<K, ElemT> implements KeyedWorkItem<K, ElemT> 
                 // todo #33176 specify additional metadata in the future
                 return WindowedValues.of(value, timestamp, windows, paneInfo);
               } catch (IOException e) {
+                if (skipExceptions) {
+                  LOG.error("Skipping element due to decoding error", e);
+                  return null;
+                }
                 throw new RuntimeException(e);
               }
-            });
+            })
+        .filter(Objects::nonNull);
   }
 
   @Override
