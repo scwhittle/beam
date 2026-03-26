@@ -20,7 +20,6 @@ package org.apache.beam.fn.harness.state;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
-import com.google.auto.value.AutoValue;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -277,31 +276,36 @@ public class StateFetchingIterators {
       }
     }
 
-    @AutoValue
-    abstract static class Block<T> implements Weighted {
-      private static class EmptyBlock extends Block<Void> {
-        @Override
-        List<Void> getValues() {
-          return ImmutableList.of();
-        }
+    static class Block<T> implements Weighted {
+      private final List<T> values;
+      private final @Nullable ByteString nextToken;
+      private final long weight;
+      private static final long ARRAY_LIST_OVERHEAD = 3 * Caches.REFERENCE_SIZE;
+      private static final Block<Void> EMPTY = new Block<>(ImmutableList.of(), null, 0);
 
-        @Nullable
-        @Override
-        ByteString getNextToken() {
-          return null;
-        }
-
-        @Override
-        public long getWeight() {
-          return 0;
-        }
+      private Block(List<T> values, @Nullable ByteString nextToken, long weight) {
+        this.values = values;
+        this.nextToken = nextToken;
+        this.weight = weight;
       }
 
-      private static final Block<Void> EMPTY = new EmptyBlock();
+      public @Nullable ByteString getNextToken() {
+        return nextToken;
+      }
+
+      @Override
+      public long getWeight() {
+        return weight;
+      }
+
+      public List<T> getValues() {
+        return values;
+      }
 
       static class Builder<T> {
-        private Builder(int size) {
-          values = new ArrayList<>(size);
+        private Builder(int initialCapacity) {
+          values = new ArrayList<>(initialCapacity);
+          weight = ARRAY_LIST_OVERHEAD;
         }
 
         void addAndWeighAll(List<T> addedValues) {
@@ -323,16 +327,19 @@ public class StateFetchingIterators {
 
         // The builder should not be used after this method.
         Block<T> build() {
+          if (values.isEmpty()) {
+            return emptyBlock();
+          }
           weight = LongMath.saturatedAdd(values.size() * Caches.REFERENCE_SIZE, weight);
-          return fromValues(values, weight, false, null);
+          return new Block<>(values, null, weight);
         }
 
         private long weight;
         private final ArrayList<T> values;
       }
 
-      static <T> Builder<T> builder(int maxSize) {
-        return new Builder<>(maxSize);
+      static <T> Builder<T> builder(int initialCapacity) {
+        return new Builder<>(initialCapacity);
       }
 
       @SuppressWarnings("unchecked") // Based upon as Collections.emptyList()
@@ -349,36 +356,33 @@ public class StateFetchingIterators {
       }
 
       public static <T> Block<T> fromValues(List<T> values, @Nullable ByteString nextToken) {
-        if (nextToken == null && values.isEmpty()) {
-          return emptyBlock();
-        }
         long listWeight = values.size() * Caches.REFERENCE_SIZE;
         for (@Nullable T value : values) {
           listWeight = LongMath.saturatedAdd(listWeight, Caches.weigh(value));
         }
-        return fromValues(values, listWeight, true, nextToken);
+        return copyValues(values, listWeight, nextToken);
       }
 
       public static <T> Block<T> fromValues(
           WeightedList<T> values, @Nullable ByteString nextToken) {
-        return fromValues(values.getBacking(), values.getWeight(), true, nextToken);
+        return copyValues(values.getBacking(), values.getWeight(), nextToken);
       }
 
-      private static <T> Block<T> fromValues(
-          List<T> values, long valuesWeight, boolean copyList, @Nullable ByteString nextToken) {
+      private static <T> Block<T> copyValues(
+          List<T> values, long valuesWeight, @Nullable ByteString nextToken) {
         if (nextToken == null && values.isEmpty()) {
           return emptyBlock();
         }
-        long listOverhead = 0;
+        long listOverhead;
         if (values instanceof ImmutableList) {
           listOverhead = Caches.REFERENCE_SIZE * 3;
-        } else if (copyList) {
+        } else {
           // We can't use ImmutableList.copy because that requires non-null values
-          // and there are some null values.
+          // and null values are supported in Beam.
           @SuppressWarnings("unchecked")
           List<T> copiedValues = (List<T>) Arrays.asList(values.toArray());
           values = copiedValues;
-          listOverhead = 3 * Caches.REFERENCE_SIZE + 8;
+          listOverhead = ARRAY_LIST_OVERHEAD;
         }
         long weight = LongMath.saturatedAdd(valuesWeight, listOverhead);
         if (nextToken != null) {
@@ -388,17 +392,8 @@ public class StateFetchingIterators {
             weight = LongMath.saturatedAdd(weight, Caches.weigh(nextToken));
           }
         }
-        return new AutoValue_StateFetchingIterators_CachingStateIterable_Block<>(
-            values, nextToken, weight);
+        return new Block<>(values, nextToken, weight);
       }
-
-      // The returned list should not be modified.
-      abstract List<T> getValues();
-
-      abstract @Nullable ByteString getNextToken();
-
-      @Override
-      public abstract long getWeight();
     }
 
     private final Cache<IterableCacheKey, Blocks<T>> cache;
