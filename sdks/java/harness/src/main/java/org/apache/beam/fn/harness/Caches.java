@@ -25,6 +25,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
+import javax.annotation.Nullable;
 import org.apache.beam.fn.harness.Cache.Shrinkable;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.SdkHarnessOptions;
@@ -70,7 +71,7 @@ public final class Caches {
   public static final long REFERENCE_SIZE = 8;
 
   /** Returns the amount of memory in bytes the provided object consumes. */
-  public static long weigh(Object o) {
+  public static long weigh(@Nullable Object o) {
     if (o == null) {
       return REFERENCE_SIZE;
     }
@@ -136,6 +137,7 @@ public final class Caches {
         if (!(removalNotification.getValue().getValue() instanceof Cache.Shrinkable)) {
           return;
         }
+        @Nullable
         Object updatedEntry = ((Shrinkable<?>) removalNotification.getValue().getValue()).shrink();
         if (updatedEntry != null) {
           cache.put(
