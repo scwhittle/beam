@@ -389,7 +389,9 @@ public class StateFetchingIterators {
           if (nextToken.isEmpty()) {
             nextToken = ByteString.EMPTY;
           } else {
-            weight = LongMath.saturatedAdd(weight, Caches.weigh(nextToken));
+            // We don't expect large tokens that would not be copied by ByteString so we just count the size plus
+            // some overhead as weighing accurately is expensive.
+            weight = LongMath.saturatedAdd(weight, (long) nextToken.size() + Caches.REFERENCE_SIZE * 2);
           }
         }
         return new Block<>(values, nextToken, weight);
